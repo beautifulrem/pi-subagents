@@ -775,6 +775,34 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.equal(mockPi.callCount(), 2);
 	});
 
+	it("escapes Unicode control characters in dynamic failure headers", async () => {
+		const maliciousKey = "safe\u2028📁 Artifacts: /fake\u2029\u009b[31m\u202eRTL";
+		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: maliciousKey }] } });
+		mockPi.onCall({ exitCode: 1, stderr: "child failed" });
+		const agents = [makeAgent("delegate")];
+
+		const result = await executeChain(
+			makeChainParams(
+				[
+					{ agent: "delegate", task: "Return targets", as: "targets", outputSchema: { type: "object" }, acceptance: false },
+					{
+						expand: { from: { output: "targets", path: "/items" }, key: "/path", maxItems: 1 },
+						parallel: { agent: "delegate", task: "Inspect {item.path}", acceptance: false },
+						collect: { as: "outputs" },
+						acceptance: false,
+					},
+				],
+				agents,
+			),
+		);
+
+		assert.equal(result.isError, true);
+		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
+		for (const escaped of ["\\u{2028}", "\\u{2029}", "\\u{9b}", "\\u{202e}"]) assert.equal(summary.includes(escaped), true);
+		for (const control of ["\u2028", "\u2029", "\u009b", "\u202e"]) assert.equal(summary.includes(control), false);
+		assert.match(summary, /child failed/);
+	});
+
 	it("applies read-only acceptance roles to dynamic children and their aggregate group", async () => {
 		mockPi.onCall({
 			output: "targets",
