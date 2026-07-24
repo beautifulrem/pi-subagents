@@ -13,6 +13,10 @@ function createResultWatcher(...args: Parameters<typeof createRuntimeResultWatch
 	return createRuntimeResultWatcher(pi, state, resultsDir, completionTtlMs, { resultIntercom: true, ...deps });
 }
 
+function activeResultClaimCount(): number {
+	return ((globalThis as typeof globalThis & { __piSubagentActiveResultClaims?: Set<string> }).__piSubagentActiveResultClaims)?.size ?? 0;
+}
+
 function createState(): SubagentState {
 	return {
 		baseCwd: "/repo",
@@ -1016,6 +1020,35 @@ describe("result watcher", () => {
 		}
 	});
 
+	it("releases the live claim lease when deleting a duplicate result", async () => {
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-duplicate-lease-"));
+		try {
+			const state = createState();
+			state.currentSessionId = "session-1";
+			let deliveries = 0;
+			const watcher = createResultWatcher({ events: { on: () => () => {}, emit() {} } }, state, resultsDir, 60_000, {
+				notifier: { async deliver() { deliveries += 1; return true; } },
+			});
+			const resultFile = "duplicate.json";
+			const result = { id: "duplicate", sessionId: "session-1", agent: "worker", success: true, summary: "duplicate" };
+			const resultPath = path.join(resultsDir, resultFile);
+			fs.writeFileSync(resultPath, JSON.stringify(result), "utf-8");
+			state.completionSeen.set(buildCompletionKey(result, `result:${resultFile}`), Date.now());
+			try {
+				watcher.primeExistingResults();
+				const deadline = Date.now() + 1000;
+				while (fs.existsSync(resultPath) && Date.now() <= deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+			} finally {
+				watcher.stopResultWatcher();
+			}
+			assert.equal(deliveries, 0);
+			assert.equal(fs.existsSync(resultPath), false);
+			assert.equal(activeResultClaimCount(), 0);
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+	});
+
 	it("delivers a result when a previous duplicate key has expired", async () => {
 		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-expired-"));
 		try {
@@ -1106,6 +1139,7 @@ describe("result watcher", () => {
 			}
 			assert.deepEqual(delivered, ["old-result", "new-result"]);
 			assert.equal(fs.existsSync(resultPath), false);
+			assert.equal(activeResultClaimCount(), 0);
 		} finally {
 			fs.rmSync(resultsDir, { recursive: true, force: true });
 		}
@@ -1232,6 +1266,7 @@ describe("result watcher", () => {
 			}
 			assert.equal(deliveries, 1);
 			assert.deepEqual(fs.readdirSync(path.join(resultsDir, ".processing")), []);
+			assert.equal(activeResultClaimCount(), 0);
 		} finally {
 			fs.rmSync(resultsDir, { recursive: true, force: true });
 		}

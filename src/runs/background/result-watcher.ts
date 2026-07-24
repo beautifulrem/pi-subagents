@@ -173,6 +173,7 @@ export function createResultWatcher(
 		if (processing.has(file) || !fsApi.existsSync(resultPath)) return;
 		processing.add(file);
 		let claimPath: string | undefined;
+		let leasedClaimPath: string | undefined;
 		let didClaim = false;
 		try {
 			const preview = JSON.parse(fsApi.readFileSync(resultPath, "utf-8")) as ResultFileData;
@@ -182,7 +183,8 @@ export function createResultWatcher(
 			fsApi.mkdirSync(processingDir, { recursive: true });
 			claimPath = path.join(processingDir, claimFileName(file));
 			fsApi.renameSync(resultPath, claimPath);
-			activeResultClaims.add(claimPath);
+			leasedClaimPath = claimPath;
+			activeResultClaims.add(leasedClaimPath);
 			didClaim = true;
 			const data = JSON.parse(fsApi.readFileSync(claimPath, "utf-8")) as ResultFileData;
 			if (typeof data.sessionId !== "string" || !ownsSession(data.sessionId, epoch)) return;
@@ -314,7 +316,7 @@ export function createResultWatcher(
 		} catch (error) {
 			if (!isNotFound(error)) console.error(`Failed to process subagent result file '${resultPath}':`, error);
 		} finally {
-			if (claimPath) activeResultClaims.delete(claimPath);
+			if (leasedClaimPath) activeResultClaims.delete(leasedClaimPath);
 			if (claimPath && fsApi.existsSync(claimPath)) {
 				try {
 					restoreClaim(claimPath, file, triggerTurn);
