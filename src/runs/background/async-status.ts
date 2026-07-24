@@ -30,6 +30,8 @@ interface AsyncRunStepSummary {
 	turnCount?: number;
 	toolCount?: number;
 	steering?: SteeringStatus;
+	runnableAt?: number;
+	queueDurationMs?: number;
 	durationMs?: number;
 	tokens?: TokenUsage;
 	totalCost?: CostSummary;
@@ -193,6 +195,14 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 	if (status.sessionId !== undefined && typeof status.sessionId !== "string") {
 		throw new Error(`Invalid async status '${path.join(asyncDir, "status.json")}': sessionId must be a string.`);
 	}
+	for (const [index, step] of (status.steps ?? []).entries()) {
+		if (step.runnableAt !== undefined && (!Number.isFinite(step.runnableAt) || step.runnableAt < 0)) {
+			throw new Error(`Invalid async status '${path.join(asyncDir, "status.json")}': steps[${index}].runnableAt must be a non-negative finite number.`);
+		}
+		if (step.queueDurationMs !== undefined && (!Number.isFinite(step.queueDurationMs) || step.queueDurationMs < 0)) {
+			throw new Error(`Invalid async status '${path.join(asyncDir, "status.json")}': steps[${index}].queueDurationMs must be a non-negative finite number.`);
+		}
+	}
 	const { activityState, lastActivityAt } = deriveAsyncActivityState(asyncDir, status);
 	const steps = status.steps ?? [];
 	const chainStepCount = status.chainStepCount ?? steps.length;
@@ -230,6 +240,8 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.turnCount !== undefined ? { turnCount: step.turnCount } : {}),
 			...(step.toolCount !== undefined ? { toolCount: step.toolCount } : {}),
 			...(step.steering ? { steering: step.steering } : {}),
+			...(step.runnableAt !== undefined ? { runnableAt: step.runnableAt } : {}),
+			...(step.queueDurationMs !== undefined ? { queueDurationMs: step.queueDurationMs } : {}),
 			...(step.durationMs !== undefined ? { durationMs: step.durationMs } : {}),
 			...(step.tokens ? { tokens: step.tokens } : {}),
 			...(step.totalCost ? { totalCost: step.totalCost } : {}),
@@ -411,6 +423,8 @@ function formatStepLine(step: AsyncRunStepSummary): string {
 	if (activity) parts.push(activity);
 	const modelThinking = formatModelThinking(step.model, step.thinking);
 	if (modelThinking) parts.push(modelThinking);
+	const queueDurationMs = step.queueDurationMs ?? (step.status === "pending" && step.runnableAt !== undefined ? Math.max(0, Date.now() - step.runnableAt) : undefined);
+	if (queueDurationMs !== undefined) parts.push(`queue ${formatDuration(queueDurationMs)}`);
 	if (step.durationMs !== undefined) parts.push(formatDuration(step.durationMs));
 	if (step.tokens) parts.push(`${formatTokens(step.tokens.total)} tok`);
 	return parts.join(" | ");

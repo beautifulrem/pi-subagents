@@ -107,6 +107,7 @@ function readStatusFile(asyncDir: string): AsyncStatus | null {
 
 interface ResultChildOutcome {
 	agent?: string;
+	stepIndex?: number;
 	success?: boolean;
 	error?: string;
 	sessionFile?: string;
@@ -114,6 +115,8 @@ interface ResultChildOutcome {
 	thinking?: string;
 	attemptedModels?: string[];
 	modelAttempts?: NonNullable<AsyncStatus["steps"]>[number]["modelAttempts"];
+	runnableAt?: number;
+	queueDurationMs?: number;
 }
 
 interface ResultRepairData {
@@ -131,6 +134,9 @@ function readResultRepairData(resultPath: string): ResultRepairData | undefined 
 				const child = entry as ResultChildOutcome;
 				if (child.model !== undefined && typeof child.model !== "string") throw new Error(`Invalid async result file '${resultPath}': results[${index}].model must be a string.`);
 				if (child.thinking !== undefined && typeof child.thinking !== "string") throw new Error(`Invalid async result file '${resultPath}': results[${index}].thinking must be a string.`);
+				if (child.stepIndex !== undefined && (!Number.isInteger(child.stepIndex) || child.stepIndex < 0)) throw new Error(`Invalid async result file '${resultPath}': results[${index}].stepIndex must be a non-negative integer.`);
+				if (child.runnableAt !== undefined && (!Number.isFinite(child.runnableAt) || child.runnableAt < 0)) throw new Error(`Invalid async result file '${resultPath}': results[${index}].runnableAt must be a non-negative finite number.`);
+				if (child.queueDurationMs !== undefined && (!Number.isFinite(child.queueDurationMs) || child.queueDurationMs < 0)) throw new Error(`Invalid async result file '${resultPath}': results[${index}].queueDurationMs must be a non-negative finite number.`);
 				return child;
 			})
 			: undefined;
@@ -152,12 +158,26 @@ function childState(overallState: ResultRepairData["state"], child: ResultChildO
 function terminalStatusFromResult(status: AsyncStatus, resultPath: string, now: number): AsyncStatus | undefined {
 	const repair = readResultRepairData(resultPath);
 	if (!repair) return undefined;
-	const steps = (status.steps ?? []).map((step, index) => {
+	const statusSteps = status.steps ?? [];
+	const usesStableStepIndexes = repair.results?.some((child) => child.stepIndex !== undefined) === true;
+	const resultsByStepIndex = new Map<number, ResultChildOutcome>();
+	if (usesStableStepIndexes) {
+		for (const [resultIndex, child] of (repair.results ?? []).entries()) {
+			if (child.stepIndex === undefined) continue;
+			if (child.stepIndex >= statusSteps.length) throw new Error(`Invalid async result file '${resultPath}': results[${resultIndex}].stepIndex is outside status step range.`);
+			if (resultsByStepIndex.has(child.stepIndex)) throw new Error(`Invalid async result file '${resultPath}': duplicate stepIndex ${child.stepIndex}.`);
+			resultsByStepIndex.set(child.stepIndex, child);
+		}
+	}
+	const steps = statusSteps.map((step, index) => {
 		if (step.status !== "running" && step.status !== "pending") return step;
-		const child = repair.results?.[index];
+		const child = usesStableStepIndexes ? resultsByStepIndex.get(index) : repair.results?.[index];
 		const state = childState(repair.state, child);
 		const model = child?.model ?? step.model;
 		const thinking = resolveEffectiveThinking(model, child?.thinking ?? step.thinking);
+		const runnableAt = child?.runnableAt ?? step.runnableAt;
+		const queueDurationMs = child?.queueDurationMs ?? step.queueDurationMs
+			?? (runnableAt !== undefined ? Math.max(0, (step.startedAt ?? now) - runnableAt) : undefined);
 		return {
 			...step,
 			status: state === "complete" ? "complete" as const : state,
@@ -171,6 +191,8 @@ function terminalStatusFromResult(status: AsyncStatus, resultPath: string, now: 
 			thinking,
 			attemptedModels: child?.attemptedModels ?? step.attemptedModels,
 			modelAttempts: child?.modelAttempts ?? step.modelAttempts,
+			...(runnableAt !== undefined ? { runnableAt } : {}),
+			...(queueDurationMs !== undefined ? { queueDurationMs } : {}),
 		};
 	});
 	return {
@@ -222,6 +244,9 @@ function buildFailedRepair(status: AsyncStatus, asyncDir: string, now: number, r
 		? {
 			...step,
 			status: "failed" as const,
+			...(step.runnableAt !== undefined && step.queueDurationMs === undefined
+				? { queueDurationMs: Math.max(0, (step.startedAt ?? now) - step.runnableAt) }
+				: {}),
 			activityState: undefined,
 			endedAt: step.endedAt ?? now,
 			durationMs: step.startedAt !== undefined && step.durationMs === undefined ? Math.max(0, now - step.startedAt) : step.durationMs,
@@ -248,14 +273,17 @@ function buildFailedRepair(status: AsyncStatus, asyncDir: string, now: number, r
 			success: false,
 			state: "failed",
 			summary: message,
-			results: repairedSteps.map((step) => ({
+			results: repairedSteps.map((step, stepIndex) => ({
 				agent: step.agent,
+				stepIndex,
 				output: step.status === "complete" || step.status === "completed" ? "" : message,
 				error: step.status === "complete" || step.status === "completed" ? undefined : step.error ?? message,
 				success: step.status === "complete" || step.status === "completed",
 				model: step.model,
 				attemptedModels: step.attemptedModels,
 				modelAttempts: step.modelAttempts,
+				runnableAt: step.runnableAt,
+				queueDurationMs: step.queueDurationMs,
 				sessionFile: step.sessionFile,
 			})),
 			exitCode: 1,
@@ -352,6 +380,8 @@ export function reconcileAsyncRun(asyncDir: string, options: ReconcileAsyncRunOp
 		const stepRecord = step as Record<string, unknown>;
 		if (stepRecord.model !== undefined && typeof stepRecord.model !== "string") throw new Error(`Invalid async status file '${statusPath}': steps[${index}].model must be a string.`);
 		if (stepRecord.thinking !== undefined && typeof stepRecord.thinking !== "string") throw new Error(`Invalid async status file '${statusPath}': steps[${index}].thinking must be a string.`);
+		if (step.runnableAt !== undefined && (!Number.isFinite(step.runnableAt) || step.runnableAt < 0)) throw new Error(`Invalid async status file '${statusPath}': steps[${index}].runnableAt must be a non-negative finite number.`);
+		if (step.queueDurationMs !== undefined && (!Number.isFinite(step.queueDurationMs) || step.queueDurationMs < 0)) throw new Error(`Invalid async status file '${statusPath}': steps[${index}].queueDurationMs must be a non-negative finite number.`);
 	}
 
 	const runId = effectiveStatus.runId || path.basename(asyncDir);

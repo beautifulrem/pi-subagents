@@ -48,12 +48,15 @@ type ResultWatcherDeps = {
 
 type ResultFileChild = {
 	agent?: string;
+	stepIndex?: number;
 	output?: string;
 	error?: string;
 	success?: boolean;
 	state?: string;
 	stopped?: boolean;
 	sessionFile?: string;
+	runnableAt?: number;
+	queueDurationMs?: number;
 	artifactPaths?: { outputPath?: string };
 	intercomTarget?: string;
 	children?: unknown;
@@ -217,6 +220,18 @@ export function createResultWatcher(
 			const resultChildren: ResultFileChild[] = hasResultChildren
 				? data.results!
 				: [{ agent: data.agent ?? undefined, output: data.summary, success: data.success }];
+			for (const [index, child] of resultChildren.entries()) {
+				if (child.stepIndex !== undefined && (!Number.isInteger(child.stepIndex) || child.stepIndex < 0)) {
+					console.error(`Ignoring invalid stepIndex in subagent result file '${resultPath}' at results[${index}].`);
+					delete child.stepIndex;
+				}
+				for (const field of ["runnableAt", "queueDurationMs"] as const) {
+					const value = child[field];
+					if (value === undefined || (Number.isFinite(value) && value >= 0)) continue;
+					console.error(`Ignoring invalid ${field} in subagent result file '${resultPath}' at results[${index}].`);
+					delete child[field];
+				}
+			}
 			const normalizedChildren = attachNestedChildrenToResultChildren(runId, resultChildren.map((result = {}, index): SubagentResultIntercomChild => {
 				const baseOutput = result.output ?? data.summary;
 				const hasRealOutput = typeof baseOutput === "string" && baseOutput.trim().length > 0;

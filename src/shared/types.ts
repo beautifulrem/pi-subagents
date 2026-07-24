@@ -357,7 +357,7 @@ export interface SteeringRecoveryDescriptor {
 
 export type PublicNestedStepSummary = Pick<
 	NestedStepSummary,
-	"agent" | "status" | "sessionFile" | "transcriptPath" | "transcriptError" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "toolBudget" | "toolBudgetBlocked" | "startedAt" | "endedAt" | "error" | "timedOut" | "stopped"
+	"agent" | "status" | "sessionFile" | "transcriptPath" | "transcriptError" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "toolBudget" | "toolBudgetBlocked" | "runnableAt" | "queueDurationMs" | "startedAt" | "endedAt" | "error" | "timedOut" | "stopped"
 > & {
 	children?: PublicNestedRunSummary[];
 };
@@ -793,6 +793,8 @@ export interface NestedStepSummary {
 	currentPath?: string;
 	turnCount?: number;
 	toolCount?: number;
+	runnableAt?: number;
+	queueDurationMs?: number;
 	startedAt?: number;
 	endedAt?: number;
 	error?: string;
@@ -943,6 +945,10 @@ export interface AsyncStatus {
 		recentOutput?: string[];
 		turnCount?: number;
 		toolCount?: number;
+		/** Time this child became eligible for scheduler admission, excluding dependency wait. */
+		runnableAt?: number;
+		/** Scheduler wait after becoming runnable. Omitted while still queued. */
+		queueDurationMs?: number;
 		startedAt?: number;
 		endedAt?: number;
 		durationMs?: number;

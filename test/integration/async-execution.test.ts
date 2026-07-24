@@ -46,7 +46,7 @@ interface AsyncResultPayload {
 	wrapUpRequested?: boolean;
 	totalTokens?: { input: number; output: number; total: number };
 	totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
-	results: Array<{ agent?: string; output?: string; success?: boolean; error?: string; protocolError?: { code?: string; stream?: string; limitBytes?: number; observedBytes?: number }; timedOut?: boolean; stopped?: boolean; turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; terminationDeferredAtTurn?: number; exceededAtTurn?: number }; turnBudgetExceeded?: boolean; wrapUpRequested?: boolean; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; totalCost?: { inputTokens: number; outputTokens: number; costUsd: number }; structuredOutput?: unknown; agentContract?: { version: 1 }; execution?: { status?: string; success?: boolean; exitCode?: number }; effects?: { fileMutation?: { status?: string; expected?: boolean; attempted?: boolean } }; intercomTarget?: string; acceptance?: { status?: string; effectiveAcceptance?: { level?: string }; childReport?: unknown; runtimeChecks?: Array<{ id?: string; status?: string; message?: string }> }; artifactPaths?: { outputPath?: string; inputPath?: string; metadataPath?: string } }>;
+	results: Array<{ agent?: string; stepIndex?: number; output?: string; success?: boolean; skipped?: boolean; error?: string; protocolError?: { code?: string; stream?: string; limitBytes?: number; observedBytes?: number }; timedOut?: boolean; stopped?: boolean; turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; terminationDeferredAtTurn?: number; exceededAtTurn?: number }; turnBudgetExceeded?: boolean; wrapUpRequested?: boolean; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; totalCost?: { inputTokens: number; outputTokens: number; costUsd: number }; runnableAt?: number; queueDurationMs?: number; structuredOutput?: unknown; agentContract?: { version: 1 }; execution?: { status?: string; success?: boolean; exitCode?: number }; effects?: { fileMutation?: { status?: string; expected?: boolean; attempted?: boolean } }; intercomTarget?: string; acceptance?: { status?: string; effectiveAcceptance?: { level?: string }; childReport?: unknown; runtimeChecks?: Array<{ id?: string; status?: string; message?: string }> }; artifactPaths?: { outputPath?: string; inputPath?: string; metadataPath?: string } }>;
 	outputs?: Record<string, { text?: string; structured?: unknown }>;
 	workflowGraph?: { currentNodeId?: string; nodes?: Array<{ kind?: string; label?: string; phase?: string; status?: string; acceptanceStatus?: string; error?: string; outputName?: string; structured?: boolean; children?: Array<{ label?: string; outputName?: string; itemKey?: string; status?: string; acceptanceStatus?: string; error?: string }> }> };
 }
@@ -79,6 +79,9 @@ interface AsyncStatusPayload {
 		activityState?: string;
 		currentTool?: string;
 		status?: string;
+		runnableAt?: number;
+		queueDurationMs?: number;
+		startedAt?: number;
 		exitCode?: number;
 		timedOut?: boolean;
 		error?: string;
@@ -660,6 +663,156 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		}
 	});
 
+	it("records async parallel scheduler queue time in status, events, and results", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ delay: 600, output: "one done" });
+		mockPi.onCall({ output: "two done" });
+		const id = `async-parallel-queue-${Date.now().toString(36)}`;
+		executeAsyncChain(id, {
+			chain: [{
+				parallel: [
+					{ agent: "one", task: "Wait" },
+					{ agent: "two", task: "Run after one" },
+				],
+				concurrency: 1,
+			}],
+			resultMode: "parallel",
+			agents: [makeAgent("one"), makeAgent("two")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-queue" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		await waitForMockPiCall(mockPi, 0, 10_000);
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const statusPath = path.join(asyncDir, "status.json");
+		const queuedStatus = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+		assert.deepEqual(queuedStatus.steps?.map((step) => step.status), ["running", "pending"]);
+		assert.equal(typeof queuedStatus.steps?.[0]?.runnableAt, "number");
+		assert.equal(queuedStatus.steps?.[1]?.runnableAt, queuedStatus.steps?.[0]?.runnableAt);
+		assert.equal(typeof queuedStatus.steps?.[0]?.queueDurationMs, "number");
+		assert.equal(queuedStatus.steps?.[1]?.queueDurationMs, undefined);
+
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		assert.equal(payload.success, true);
+		assert.deepEqual(payload.results.map((result) => result.stepIndex), [0, 1]);
+		for (let index = 0; index < 2; index++) {
+			const step = status.steps?.[index];
+			assert.equal(step?.queueDurationMs, (step?.startedAt ?? 0) - (step?.runnableAt ?? 0));
+			assert.equal(payload.results[index]?.runnableAt, step?.runnableAt);
+			assert.equal(payload.results[index]?.queueDurationMs, step?.queueDurationMs);
+		}
+		assert.ok((status.steps?.[1]?.queueDurationMs ?? 0) >= 300, "second child should record scheduler wait behind the first");
+		const events = fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+		const started = events.filter((event) => event.type === "subagent.step.started");
+		assert.deepEqual(started.map((event) => event.queueDurationMs), status.steps?.map((step) => step.queueDurationMs));
+		assert.deepEqual(started.map((event) => event.runnableAt), status.steps?.map((step) => step.runnableAt));
+	});
+
+	it("freezes scheduler queue time for async fail-fast children that never start", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ delay: 400, exitCode: 1, stderr: "first failed" });
+		mockPi.onCall({ output: "must not start" });
+		const id = `async-parallel-queue-fail-fast-${Date.now().toString(36)}`;
+		executeAsyncChain(id, {
+			chain: [{
+				parallel: [
+					{ agent: "one", task: "Fail" },
+					{ agent: "two", task: "Must be skipped" },
+				],
+				concurrency: 1,
+				failFast: true,
+			}],
+			resultMode: "parallel",
+			agents: [makeAgent("one"), makeAgent("two")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-queue-fail-fast" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatusPayload;
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		assert.equal(payload.success, false);
+		assert.equal(payload.results[1]?.skipped, true);
+		assert.equal(typeof status.steps?.[1]?.runnableAt, "number");
+		assert.ok((status.steps?.[1]?.queueDurationMs ?? 0) >= 200);
+		assert.equal(payload.results[1]?.runnableAt, status.steps?.[1]?.runnableAt);
+		assert.equal(payload.results[1]?.queueDurationMs, status.steps?.[1]?.queueDurationMs);
+		assert.equal(mockPi.callCount(), 1);
+		const events = fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+		const skipped = events.find((event) => event.type === "subagent.step.failed" && event.stepIndex === 1);
+		assert.equal(skipped?.queueDurationMs, status.steps?.[1]?.queueDurationMs);
+	});
+
+	it("freezes scheduler queue time when interrupt pauses a child before admission", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "cross-process interrupt delivery unreliable on Windows CI" : undefined }, async () => {
+		mockPi.onCall({ delay: 5_000, output: "one done" });
+		mockPi.onCall({ output: "must remain paused" });
+		const id = `async-interrupt-queued-${Date.now().toString(36)}`;
+		executeAsyncChain(id, {
+			chain: [{ parallel: [{ agent: "one", task: "Wait" }, { agent: "two", task: "Queued" }], concurrency: 1 }],
+			resultMode: "parallel",
+			agents: [makeAgent("one"), makeAgent("two")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-interrupt-queued" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		await waitForMockPiCall(mockPi, 0, 10_000);
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const statusPath = path.join(asyncDir, "status.json");
+		const running = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload & { pid?: number };
+		deliverInterruptRequest({ asyncDir, pid: running.pid, source: "test" });
+		const resultPath = await waitForAsyncResultFile(id, 30_000);
+		const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		assert.equal(payload.state, "paused");
+		assert.deepEqual(status.steps?.map((step) => step.status), ["paused", "paused"]);
+		assert.equal(typeof status.steps?.[1]?.runnableAt, "number");
+		assert.equal(typeof status.steps?.[1]?.queueDurationMs, "number");
+		assert.equal(payload.results[1]?.queueDurationMs, status.steps?.[1]?.queueDurationMs);
+		assert.equal(mockPi.callCount(), 1);
+		const events = fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+		const paused = events.find((event) => event.type === "subagent.step.paused" && event.stepIndex === 1);
+		assert.equal(paused?.queueDurationMs, status.steps?.[1]?.queueDurationMs);
+	});
+
+	it("freezes scheduler queue time and emits a step event when stop prevents admission", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ delay: 5_000, output: "one done" });
+		mockPi.onCall({ output: "must not start" });
+		const id = `async-stop-queued-${Date.now().toString(36)}`;
+		executeAsyncChain(id, {
+			chain: [{ parallel: [{ agent: "one", task: "Wait" }, { agent: "two", task: "Queued" }], concurrency: 1 }],
+			resultMode: "parallel",
+			agents: [makeAgent("one"), makeAgent("two")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-stop-queued" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		await waitForMockPiCall(mockPi, 0, 10_000);
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const statusPath = path.join(asyncDir, "status.json");
+		const running = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload & { pid?: number };
+		deliverStopRequest({ asyncDir, pid: running.pid, source: "test" });
+		const resultPath = await waitForAsyncResultFile(id, 30_000);
+		const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		assert.equal(payload.state, "stopped");
+		assert.deepEqual(status.steps?.map((step) => step.status), ["stopped", "stopped"]);
+		assert.equal(typeof status.steps?.[1]?.queueDurationMs, "number");
+		assert.equal(payload.results[1]?.queueDurationMs, status.steps?.[1]?.queueDurationMs);
+		assert.equal(mockPi.callCount(), 1);
+		const events = fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+		const stopped = events.find((event) => event.type === "subagent.step.stopped" && event.stepIndex === 1);
+		assert.equal(stopped?.queueDurationMs, status.steps?.[1]?.queueDurationMs);
+	});
+
 	it("interrupts every active async parallel child", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "cross-process interrupt delivery unreliable on Windows CI" : undefined }, async () => {
 		mockPi.onCall({ delay: 5_000, output: "one done" });
 		mockPi.onCall({ delay: 5_000, output: "two done" });
@@ -715,7 +868,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 					{ agent: "one", task: "Wait" },
 					{ agent: "two", task: "Wait" },
 				],
-				concurrency: 2,
+				concurrency: 1,
 			}],
 			resultMode: "parallel",
 			agents: [makeAgent("one"), makeAgent("two")],
@@ -733,7 +886,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			timeoutMs: 1_500,
 		});
 
-		await waitForMockPiCall(mockPi, 1, 10_000);
+		await waitForMockPiCall(mockPi, 0, 10_000);
 		const resultPath = await waitForAsyncResultFile(id, 8_000);
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
 		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
@@ -751,7 +904,14 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.deepEqual(status.steps?.map((step) => step.timedOut), [true, true]);
 		assert.deepEqual(status.steps?.map((step) => step.error), ["Subagent timed out after 1500ms.", "Subagent timed out after 1500ms."]);
 		assert.deepEqual(payload.results.map((result) => result.timedOut), [true, true]);
-		assert.equal(mockPi.callCount(), 2);
+		assert.equal(typeof status.steps?.[1]?.runnableAt, "number");
+		assert.ok((status.steps?.[1]?.queueDurationMs ?? 0) >= 1_000, "queued child should freeze scheduler wait at timeout");
+		assert.equal(payload.results[1]?.runnableAt, status.steps?.[1]?.runnableAt);
+		assert.equal(payload.results[1]?.queueDurationMs, status.steps?.[1]?.queueDurationMs);
+		assert.equal(mockPi.callCount(), 1);
+		const events = fs.readFileSync(path.join(ASYNC_DIR, id, "events.jsonl"), "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+		const queuedFailure = events.find((event) => event.type === "subagent.step.failed" && event.stepIndex === 1);
+		assert.equal(queuedFailure?.queueDurationMs, status.steps?.[1]?.queueDurationMs);
 	});
 
 	it("hard-kills async children that ignore timeout SIGTERM", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
@@ -1652,7 +1812,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 
 	it("async dynamic status shows a placeholder before materialization", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		mockPi.onCall({ delay: 800, output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] } });
-		mockPi.onCall({ output: "review-a", structuredOutput: { ok: "a" } });
+		mockPi.onCall({ delay: 400, output: "review-a", structuredOutput: { ok: "a" } });
 		mockPi.onCall({ output: "review-b", structuredOutput: { ok: "b" } });
 		mockPi.onCall({ output: "used reviews" });
 		const id = `async-dynamic-placeholder-${Date.now().toString(36)}`;
@@ -1692,8 +1852,16 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const finalStatus = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
 		assert.equal(payload.success, true);
+		assert.deepEqual(payload.results.map((result) => result.stepIndex), [0, 1, 2, 3]);
 		assert.deepEqual(finalStatus.steps?.map((step) => step.agent), ["producer", "reviewer", "reviewer", "consumer"]);
 		assert.deepEqual(finalStatus.parallelGroups, [{ start: 1, count: 2, stepIndex: 1 }]);
+		for (const index of [1, 2]) {
+			const step = finalStatus.steps?.[index];
+			assert.equal(step?.queueDurationMs, (step?.startedAt ?? 0) - (step?.runnableAt ?? 0));
+			assert.equal(payload.results[index]?.runnableAt, step?.runnableAt);
+			assert.equal(payload.results[index]?.queueDurationMs, step?.queueDurationMs);
+		}
+		assert.ok((finalStatus.steps?.[2]?.queueDurationMs ?? 0) >= 200, "second dynamic child should record scheduler wait");
 	});
 
 	it("escapes dynamic keys in async workflow labels and downstream headers", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {

@@ -67,7 +67,7 @@ function child(id: string, state: "queued" | "running" | "complete" | "failed" |
 		agents: ["reviewer"],
 		startedAt: 10,
 		lastUpdate: ts,
-		steps: [{ agent: "leaf", status: state === "running" ? "running" as const : "complete" as const }],
+		steps: [{ agent: "leaf", status: state === "running" ? "running" as const : "complete" as const, runnableAt: 10, queueDurationMs: 0 }],
 	};
 }
 
@@ -171,6 +171,8 @@ describe("nested event parsing and projection", () => {
 		assert.equal(registry.children[0]?.id, "nested-a");
 		assert.equal(registry.children[0]?.state, "complete");
 		assert.equal(registry.children[0]?.steps?.[0]?.agent, "leaf");
+		assert.equal(registry.children[0]?.steps?.[0]?.runnableAt, 10);
+		assert.equal(registry.children[0]?.steps?.[0]?.queueDurationMs, 0);
 
 		const job: AsyncJobState = {
 			asyncId: "root-run",
@@ -303,13 +305,20 @@ describe("nested event parsing and projection", () => {
 			parentRunId: "root-run",
 			parentStepIndex: 1,
 			capabilityToken: route.capabilityToken,
-			child: { ...child("nested-invalid-tokens", "running", 200), totalTokens: { input: 1, output: "bad", total: 1 } },
+			child: {
+				...child("nested-invalid-tokens", "running", 200),
+				totalTokens: { input: 1, output: "bad", total: 1 },
+				steps: [{ agent: "leaf", status: "running", runnableAt: -1, queueDurationMs: -1 }],
+			},
 		})}\n`, "utf-8");
 
 		const registry = projectNestedEvents(route);
 
 		assert.deepEqual(registry.children.find((item) => item.id === "nested-valid-tokens")?.totalTokens, { input: 10, output: 15, total: 25 });
-		assert.equal(registry.children.find((item) => item.id === "nested-invalid-tokens")?.totalTokens, undefined);
+		const invalid = registry.children.find((item) => item.id === "nested-invalid-tokens");
+		assert.equal(invalid?.totalTokens, undefined);
+		assert.equal(invalid?.steps?.[0]?.runnableAt, undefined);
+		assert.equal(invalid?.steps?.[0]?.queueDurationMs, undefined);
 	});
 
 	it("parses only complete jsonl records", () => {

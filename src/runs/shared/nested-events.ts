@@ -170,6 +170,11 @@ function clampNumber(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function nonNegativeNumber(value: unknown): number | undefined {
+	const number = clampNumber(value);
+	return number !== undefined && number >= 0 ? number : undefined;
+}
+
 function stringValue(value: unknown, max = 512): string | undefined {
 	return typeof value === "string" && value.length > 0 ? value.slice(0, max) : undefined;
 }
@@ -240,6 +245,8 @@ function sanitizeStep(input: unknown, depth: number): NestedStepSummary | undefi
 		...(stringValue(raw.currentPath, 2048) ? { currentPath: stringValue(raw.currentPath, 2048) } : {}),
 		...(clampNumber(raw.turnCount) !== undefined ? { turnCount: clampNumber(raw.turnCount) } : {}),
 		...(clampNumber(raw.toolCount) !== undefined ? { toolCount: clampNumber(raw.toolCount) } : {}),
+		...(nonNegativeNumber(raw.runnableAt) !== undefined ? { runnableAt: nonNegativeNumber(raw.runnableAt) } : {}),
+		...(nonNegativeNumber(raw.queueDurationMs) !== undefined ? { queueDurationMs: nonNegativeNumber(raw.queueDurationMs) } : {}),
 		...(clampNumber(raw.startedAt) !== undefined ? { startedAt: clampNumber(raw.startedAt) } : {}),
 		...(clampNumber(raw.endedAt) !== undefined ? { endedAt: clampNumber(raw.endedAt) } : {}),
 		...(stringValue(raw.error, 1024) ? { error: stringValue(raw.error, 1024) } : {}),
@@ -882,6 +889,8 @@ export function nestedSummaryFromAsyncStatus(status: AsyncStatus, asyncDir: stri
 			...(step.currentPath ? { currentPath: step.currentPath } : {}),
 			...(step.turnCount !== undefined ? { turnCount: step.turnCount } : {}),
 			...(step.toolCount !== undefined ? { toolCount: step.toolCount } : {}),
+			...(step.runnableAt !== undefined ? { runnableAt: step.runnableAt } : {}),
+			...(step.queueDurationMs !== undefined ? { queueDurationMs: step.queueDurationMs } : {}),
 			...(step.startedAt !== undefined ? { startedAt: step.startedAt } : {}),
 			...(step.endedAt !== undefined ? { endedAt: step.endedAt } : {}),
 			...(step.error ? { error: step.error } : {}),

@@ -28,7 +28,7 @@ describe("async status helpers", () => {
 				outputFile,
 				steps: [
 					{ agent: "scout", status: "complete", durationMs: 10 },
-					{ agent: "worker", status: "running", durationMs: 20 },
+					{ agent: "worker", status: "running", runnableAt: 100, queueDurationMs: 0, startedAt: 100, durationMs: 20 },
 				],
 			});
 			createAsyncDir(root, "run-b", {
@@ -47,7 +47,11 @@ describe("async status helpers", () => {
 			assert.equal(runs[0]?.steps.length, 2);
 			assert.equal(runs[0]?.steps[1]?.agent, "worker");
 			assert.equal(runs[0]?.steps[1]?.status, "running");
-			assert.match(formatAsyncRunList(runs), /output: .*output-1\.log/);
+			assert.equal(runs[0]?.steps[1]?.runnableAt, 100);
+			assert.equal(runs[0]?.steps[1]?.queueDurationMs, 0);
+			const text = formatAsyncRunList(runs);
+			assert.match(text, /worker \| running \| queue 0ms/);
+			assert.match(text, /output: .*output-1\.log/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -302,6 +306,26 @@ describe("async status helpers", () => {
 			assert.throws(
 				() => listAsyncRuns(root),
 				/sessionId must be a string/,
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects malformed persisted scheduler queue metrics", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-bad-queue-metrics-"));
+		try {
+			createAsyncDir(root, "bad-queue", {
+				runId: "bad-queue",
+				mode: "parallel",
+				state: "running",
+				startedAt: 100,
+				steps: [{ agent: "worker", status: "pending", runnableAt: 100, queueDurationMs: -1 }],
+			});
+
+			assert.throws(
+				() => listAsyncRuns(root),
+				/queueDurationMs must be a non-negative finite number/,
 			);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });

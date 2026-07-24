@@ -115,6 +115,8 @@ function compactNestedRun(run: NestedRunSummary | PublicNestedRunSummary, depth 
 			...(step.currentPath ? { currentPath: step.currentPath } : {}),
 			...(step.turnCount !== undefined ? { turnCount: step.turnCount } : {}),
 			...(step.toolCount !== undefined ? { toolCount: step.toolCount } : {}),
+			...(step.runnableAt !== undefined ? { runnableAt: step.runnableAt } : {}),
+			...(step.queueDurationMs !== undefined ? { queueDurationMs: step.queueDurationMs } : {}),
 			...(step.startedAt !== undefined ? { startedAt: step.startedAt } : {}),
 			...(step.endedAt !== undefined ? { endedAt: step.endedAt } : {}),
 			...(step.error ? { error: step.error } : {}),

@@ -152,6 +152,8 @@ interface SubagentRunConfig {
 
 interface StepResult {
 	agent: string;
+	/** Stable flat status-step index. Synthetic aggregate results omit it. */
+	stepIndex?: number;
 	context?: "fresh" | "fork";
 	output: string;
 	error?: string;
@@ -173,6 +175,8 @@ interface StepResult {
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
 	totalCost?: CostSummary;
+	runnableAt?: number;
+	queueDurationMs?: number;
 	artifactPaths?: ArtifactPaths;
 	truncated?: boolean;
 	transcriptPath?: string;
@@ -883,6 +887,7 @@ function writeRunLog(
 		steps: Array<{
 			agent: string;
 			status: string;
+			queueDurationMs?: number;
 			durationMs?: number;
 		}>;
 		summary: string;
@@ -907,11 +912,12 @@ function writeRunLog(
 	if (input.artifactsDir) lines.push(`- **Artifacts:** ${input.artifactsDir}`);
 	lines.push("");
 	lines.push("## Steps");
-	lines.push("| Step | Agent | Status | Duration |");
-	lines.push("| --- | --- | --- | --- |");
+	lines.push("| Step | Agent | Status | Queue | Duration |");
+	lines.push("| --- | --- | --- | --- | --- |");
 	input.steps.forEach((step, i) => {
+		const queue = step.queueDurationMs !== undefined ? formatDuration(step.queueDurationMs) : "-";
 		const duration = step.durationMs !== undefined ? formatDuration(step.durationMs) : "-";
-		lines.push(`| ${i + 1} | ${step.agent} | ${step.status} | ${duration} |`);
+		lines.push(`| ${i + 1} | ${step.agent} | ${step.status} | ${queue} | ${duration} |`);
 	});
 	lines.push("");
 	lines.push("## Summary");
@@ -1457,6 +1463,11 @@ type RunnerStatusPayload = Omit<AsyncStatus, "steps" | "parallelGroups" | "pid" 
 	error?: string;
 };
 
+function freezeQueueDuration(step: RunnerStatusStep, terminalAt: number): void {
+	if (step.runnableAt === undefined || step.queueDurationMs !== undefined) return;
+	step.queueDurationMs = Math.max(0, terminalAt - step.runnableAt);
+}
+
 function markParallelGroupSetupFailure(input: {
 	statusPayload: RunnerStatusPayload;
 	results: StepResult[];
@@ -1477,7 +1488,7 @@ function markParallelGroupSetupFailure(input: {
 		input.statusPayload.steps[flatTaskIndex].endedAt = input.failedAt;
 		input.statusPayload.steps[flatTaskIndex].durationMs = 0;
 		input.statusPayload.steps[flatTaskIndex].exitCode = 1;
-		input.results.push({ agent: input.group.parallel[taskIndex].agent, context: input.group.parallel[taskIndex].context, output: input.setupError, success: false, exitCode: 1, sessionFile: input.group.parallel[taskIndex].sessionFile });
+		input.results.push({ agent: input.group.parallel[taskIndex].agent, stepIndex: flatTaskIndex, context: input.group.parallel[taskIndex].context, output: input.setupError, success: false, exitCode: 1, sessionFile: input.group.parallel[taskIndex].sessionFile });
 	}
 	input.statusPayload.currentStep = input.groupStartFlatIndex;
 	input.statusPayload.lastUpdate = input.failedAt;
@@ -1506,6 +1517,8 @@ function markParallelGroupRunning(input: {
 	for (let taskIndex = 0; taskIndex < input.group.parallel.length; taskIndex++) {
 		const flatTaskIndex = input.groupStartFlatIndex + taskIndex;
 		input.statusPayload.steps[flatTaskIndex].status = "pending";
+		input.statusPayload.steps[flatTaskIndex].runnableAt = input.groupStartTime;
+		input.statusPayload.steps[flatTaskIndex].queueDurationMs = undefined;
 		input.statusPayload.steps[flatTaskIndex].startedAt = undefined;
 		input.statusPayload.steps[flatTaskIndex].endedAt = undefined;
 		input.statusPayload.steps[flatTaskIndex].durationMs = undefined;
@@ -2532,13 +2545,26 @@ async function runSubagent(
 		currentActivityState = undefined;
 		statusPayload.activityState = undefined;
 		statusPayload.lastUpdate = now;
-		for (const step of statusPayload.steps) {
+		for (const [index, step] of statusPayload.steps.entries()) {
 			if (step.status === "running") {
 				step.status = "paused";
 				step.activityState = undefined;
 				step.endedAt = now;
 				step.durationMs = step.startedAt ? now - step.startedAt : undefined;
 				step.lastActivityAt = now;
+			} else if (step.status === "pending" && step.runnableAt !== undefined) {
+				freezeQueueDuration(step, now);
+				step.status = "paused";
+				step.activityState = undefined;
+				step.endedAt = now;
+				step.durationMs = 0;
+				step.exitCode = 0;
+				step.lastActivityAt = now;
+				appendJsonl(eventsPath, JSON.stringify({
+					type: "subagent.step.paused", ts: now, runId: id, stepIndex: index, agent: step.agent, exitCode: 0, durationMs: 0,
+					runnableAt: step.runnableAt,
+					queueDurationMs: step.queueDurationMs,
+				}));
 			}
 		}
 		writeStatusPayload();
@@ -2560,8 +2586,10 @@ async function runSubagent(
 		currentActivityState = undefined;
 		statusPayload.activityState = undefined;
 		statusPayload.lastUpdate = now;
-		for (const step of statusPayload.steps) {
+		for (const [index, step] of statusPayload.steps.entries()) {
 			if (step.status !== "running" && step.status !== "pending") continue;
+			const wasPending = step.status === "pending";
+			freezeQueueDuration(step, now);
 			step.status = "stopped";
 			step.error = stopMessage;
 			step.exitCode = 1;
@@ -2570,6 +2598,11 @@ async function runSubagent(
 			step.endedAt = now;
 			step.durationMs = step.startedAt ? now - step.startedAt : 0;
 			step.lastActivityAt = now;
+			if (wasPending) appendJsonl(eventsPath, JSON.stringify({
+				type: "subagent.step.stopped", ts: now, runId: id, stepIndex: index, agent: step.agent, exitCode: 1, durationMs: 0,
+				runnableAt: step.runnableAt,
+				queueDurationMs: step.queueDurationMs,
+			}));
 		}
 		writeStatusPayload();
 		appendJsonl(eventsPath, JSON.stringify({
@@ -2593,8 +2626,10 @@ async function runSubagent(
 		currentActivityState = undefined;
 		statusPayload.activityState = undefined;
 		statusPayload.lastUpdate = now;
-		for (const step of statusPayload.steps) {
+		for (const [index, step] of statusPayload.steps.entries()) {
 			if (step.status !== "running" && step.status !== "pending") continue;
+			const wasPending = step.status === "pending";
+			freezeQueueDuration(step, now);
 			step.status = "failed";
 			step.error = message;
 			step.exitCode = 1;
@@ -2603,6 +2638,11 @@ async function runSubagent(
 			step.endedAt = now;
 			step.durationMs = step.startedAt ? now - step.startedAt : 0;
 			step.lastActivityAt = now;
+			if (wasPending) appendJsonl(eventsPath, JSON.stringify({
+				type: "subagent.step.failed", ts: now, runId: id, stepIndex: index, agent: step.agent, exitCode: 1, durationMs: 0,
+				runnableAt: step.runnableAt,
+				queueDurationMs: step.queueDurationMs,
+			}));
 		}
 		writeStatusPayload();
 		appendJsonl(eventsPath, JSON.stringify({
@@ -2710,7 +2750,7 @@ async function runSubagent(
 				statusPayload.lastUpdate = now;
 				markDynamicGraphGroup(stepIndex, "failed", message);
 				writeStatusPayload();
-				results.push({ agent: step.parallel.agent, context: step.parallel.context, output: message, error: message, success: false, exitCode: 1 });
+				results.push({ agent: step.parallel.agent, stepIndex: groupStartFlatIndex, context: step.parallel.context, output: message, error: message, success: false, exitCode: 1 });
 				break;
 			}
 
@@ -2777,7 +2817,7 @@ async function runSubagent(
 					markDynamicGraphGroup(stepIndex, groupStopped ? "stopped" : "failed", errorMessage, effectiveGroupAcceptance);
 					statusPayload.lastUpdate = Date.now();
 					writeStatusPayload();
-					results.push({ agent: step.parallel.agent, context: step.parallel.context, output: errorMessage, error: errorMessage, success: false, exitCode: 1, timedOut: groupTimedOut ? true : undefined, stopped: groupStopped ? true : undefined, acceptance: effectiveGroupAcceptance });
+					results.push({ agent: step.parallel.agent, stepIndex: groupStartFlatIndex, context: step.parallel.context, output: errorMessage, error: errorMessage, success: false, exitCode: 1, timedOut: groupTimedOut ? true : undefined, stopped: groupStopped ? true : undefined, acceptance: effectiveGroupAcceptance });
 					break;
 				}
 				flatIndex++;
@@ -2823,6 +2863,7 @@ async function runSubagent(
 				};
 			});
 			const dynamicFlatStepCount = Math.max(statusPayload.steps.length - 1 + dynamicSteps.length, 1);
+			const groupRunnableAt = Date.now();
 			const dynamicStatusSteps: RunnerStatusStep[] = dynamicSteps.map((task, itemIndex) => {
 				const transcriptPath = resolveAsyncStepTranscriptPath({ artifactsDir, artifactConfig, runId: id, agent: task.agent, flatIndex: groupStartFlatIndex + itemIndex, flatStepCount: dynamicFlatStepCount });
 				return {
@@ -2834,6 +2875,7 @@ async function runSubagent(
 					structured: Boolean(task.structuredOutputSchema),
 					...(task.agentContract ? { agentContract: task.agentContract } : {}),
 					status: "pending",
+					runnableAt: groupRunnableAt,
 					...(task.sessionFile ? { sessionFile: task.sessionFile } : {}),
 					...(transcriptPath ? { transcriptPath } : {}),
 					skills: task.skills,
@@ -2897,6 +2939,7 @@ async function runSubagent(
 				if (interrupted) return pausedStepResult(task.agent, task.context);
 				if (aborted && failFast) {
 					const skippedAt = Date.now();
+					freezeQueueDuration(statusPayload.steps[fi], skippedAt);
 					statusPayload.steps[fi].status = "failed";
 					statusPayload.steps[fi].error = "Skipped due to fail-fast";
 					statusPayload.steps[fi].startedAt = skippedAt;
@@ -2905,10 +2948,16 @@ async function runSubagent(
 					statusPayload.steps[fi].exitCode = -1;
 					statusPayload.lastUpdate = skippedAt;
 					writeStatusPayload();
+					appendJsonl(eventsPath, JSON.stringify({
+						type: "subagent.step.failed", ts: skippedAt, runId: id, stepIndex: fi, agent: task.agent, exitCode: -1, durationMs: 0,
+						runnableAt: statusPayload.steps[fi].runnableAt,
+						queueDurationMs: statusPayload.steps[fi].queueDurationMs,
+					}));
 					return { agent: task.agent, context: task.context, output: "(skipped — fail-fast)", exitCode: -1 as number | null, skipped: true };
 				}
 				const taskStartTime = Date.now();
 				statusPayload.currentStep = fi;
+				statusPayload.steps[fi].queueDurationMs = Math.max(0, taskStartTime - (statusPayload.steps[fi].runnableAt ?? taskStartTime));
 				statusPayload.steps[fi].status = "running";
 				statusPayload.steps[fi].error = undefined;
 				statusPayload.steps[fi].activityState = undefined;
@@ -2919,7 +2968,11 @@ async function runSubagent(
 				statusPayload.lastActivityAt = taskStartTime;
 				statusPayload.lastUpdate = taskStartTime;
 				writeStatusPayload();
-				appendJsonl(eventsPath, JSON.stringify({ type: "subagent.step.started", ts: taskStartTime, runId: id, stepIndex: fi, agent: task.agent }));
+				appendJsonl(eventsPath, JSON.stringify({
+					type: "subagent.step.started", ts: taskStartTime, runId: id, stepIndex: fi, agent: task.agent,
+					runnableAt: statusPayload.steps[fi].runnableAt,
+					queueDurationMs: statusPayload.steps[fi].queueDurationMs,
+				}));
 				flushPendingStepSteers(fi);
 				const singleResult = await runSingleStep(task, {
 					previousOutput, placeholder, cwd, sessionEnabled,
@@ -2992,15 +3045,20 @@ async function runSubagent(
 					type: stopped || childStopped ? "subagent.step.stopped" : timedOut ? "subagent.step.failed" : childInterrupted ? "subagent.step.paused" : singleResult.exitCode === 0 ? "subagent.step.completed" : "subagent.step.failed",
 					ts: taskEndTime, runId: id, stepIndex: fi, agent: task.agent,
 					exitCode: stopped || childStopped ? 1 : timedOut ? 1 : childInterrupted ? 0 : singleResult.exitCode, durationMs: taskEndTime - taskStartTime,
+					runnableAt: statusPayload.steps[fi].runnableAt,
+					queueDurationMs: statusPayload.steps[fi].queueDurationMs,
 				}));
 				if (singleResult.exitCode !== 0 && failFast) aborted = true;
 				return stopped || childStopped ? { ...singleResult, output: stopMessage, error: stopMessage, exitCode: 1, interrupted: false, timedOut: false, stopped: true, skipped: false } : timedOut ? { ...singleResult, output: timeoutMessage ?? "Subagent timed out.", error: timeoutMessage ?? "Subagent timed out.", exitCode: 1, interrupted: false, timedOut: true, skipped: false } : { ...singleResult, skipped: false };
 			}, globalSemaphore);
 
 			flatIndex += dynamicSteps.length;
-			for (const pr of parallelResults) {
+			for (let resultIndex = 0; resultIndex < parallelResults.length; resultIndex++) {
+				const pr = parallelResults[resultIndex]!;
+				const statusStep = statusPayload.steps[groupStartFlatIndex + resultIndex]!;
 				results.push({
 					agent: pr.agent,
+					stepIndex: groupStartFlatIndex + resultIndex,
 					context: pr.context,
 					agentContract: pr.agentContract,
 					output: pr.output,
@@ -3023,6 +3081,8 @@ async function runSubagent(
 					attemptedModels: pr.attemptedModels,
 					modelAttempts: pr.modelAttempts,
 					totalCost: pr.totalCost,
+					runnableAt: statusStep.runnableAt,
+					queueDurationMs: statusStep.queueDurationMs,
 					artifactPaths: pr.artifactPaths,
 					transcriptPath: pr.transcriptPath,
 					transcriptError: pr.transcriptError,
@@ -3205,6 +3265,7 @@ async function runSubagent(
 						if (interrupted) return pausedStepResult(task.agent, task.context);
 						if (aborted && failFast) {
 							const skippedAt = Date.now();
+							freezeQueueDuration(statusPayload.steps[fi], skippedAt);
 							statusPayload.steps[fi].status = "failed";
 							statusPayload.steps[fi].error = "Skipped due to fail-fast";
 							statusPayload.steps[fi].startedAt = skippedAt;
@@ -3216,12 +3277,15 @@ async function runSubagent(
 							writeStatusPayload();
 							appendJsonl(eventsPath, JSON.stringify({
 								type: "subagent.step.failed", ts: skippedAt, runId: id, stepIndex: fi, agent: task.agent, exitCode: -1, durationMs: 0,
+								runnableAt: statusPayload.steps[fi].runnableAt,
+								queueDurationMs: statusPayload.steps[fi].queueDurationMs,
 							}));
 							return { agent: task.agent, context: task.context, output: "(skipped — fail-fast)", exitCode: -1 as number | null, skipped: true };
 						}
 
 						const taskStartTime = Date.now();
 						statusPayload.currentStep = fi;
+						statusPayload.steps[fi].queueDurationMs = Math.max(0, taskStartTime - (statusPayload.steps[fi].runnableAt ?? taskStartTime));
 						statusPayload.steps[fi].status = "running";
 						statusPayload.steps[fi].error = undefined;
 						statusPayload.steps[fi].activityState = undefined;
@@ -3237,6 +3301,8 @@ async function runSubagent(
 
 						appendJsonl(eventsPath, JSON.stringify({
 							type: "subagent.step.started", ts: taskStartTime, runId: id, stepIndex: fi, agent: task.agent,
+							runnableAt: statusPayload.steps[fi].runnableAt,
+							queueDurationMs: statusPayload.steps[fi].queueDurationMs,
 						}));
 
 						const taskSessionDir = config.sessionDir
@@ -3323,6 +3389,8 @@ async function runSubagent(
 							type: stopped || childStopped ? "subagent.step.stopped" : timedOut ? "subagent.step.failed" : childInterrupted ? "subagent.step.paused" : singleResult.exitCode === 0 ? "subagent.step.completed" : "subagent.step.failed",
 							ts: taskEndTime, runId: id, stepIndex: fi, agent: task.agent,
 							exitCode: stopped || childStopped ? 1 : timedOut ? 1 : childInterrupted ? 0 : singleResult.exitCode, durationMs: taskDuration,
+							runnableAt: statusPayload.steps[fi].runnableAt,
+							queueDurationMs: statusPayload.steps[fi].queueDurationMs,
 						}));
 						if (singleResult.completionGuardTriggered) {
 							const event = buildControlEvent({
@@ -3364,9 +3432,12 @@ async function runSubagent(
 				statusPayload.lastUpdate = Date.now();
 				writeStatusPayload();
 
-				for (const pr of parallelResults) {
+				for (let resultIndex = 0; resultIndex < parallelResults.length; resultIndex++) {
+					const pr = parallelResults[resultIndex]!;
+					const statusStep = statusPayload.steps[groupStartFlatIndex + resultIndex]!;
 					results.push({
 						agent: pr.agent,
+						stepIndex: groupStartFlatIndex + resultIndex,
 						context: pr.context,
 						agentContract: pr.agentContract,
 						output: pr.output,
@@ -3389,6 +3460,8 @@ async function runSubagent(
 						attemptedModels: pr.attemptedModels,
 						modelAttempts: pr.modelAttempts,
 						totalCost: pr.totalCost,
+						runnableAt: statusStep.runnableAt,
+						queueDurationMs: statusStep.queueDurationMs,
 						artifactPaths: pr.artifactPaths,
 						transcriptPath: pr.transcriptPath,
 						transcriptError: pr.transcriptError,
@@ -3456,6 +3529,8 @@ async function runSubagent(
 			statusPayload.activityState = undefined;
 			resetStepLiveDetail(statusPayload.steps[flatIndex]);
 			statusPayload.steps[flatIndex].skills = seqStep.skills;
+			statusPayload.steps[flatIndex].runnableAt = stepStartTime;
+			statusPayload.steps[flatIndex].queueDurationMs = 0;
 			statusPayload.steps[flatIndex].startedAt = stepStartTime;
 			statusPayload.steps[flatIndex].lastActivityAt = stepStartTime;
 			statusPayload.lastActivityAt = stepStartTime;
@@ -3469,6 +3544,8 @@ async function runSubagent(
 				runId: id,
 				stepIndex: flatIndex,
 				agent: seqStep.agent,
+				runnableAt: stepStartTime,
+				queueDurationMs: 0,
 			}));
 
 			flushPendingStepSteers(flatIndex);
@@ -3509,6 +3586,7 @@ async function runSubagent(
 			const childStopped = singleResult.stopped === true;
 			results.push({
 				agent: singleResult.agent,
+				stepIndex: flatIndex,
 				context: singleResult.context,
 				agentContract: singleResult.agentContract,
 				output: stopped || childStopped ? stopMessage : timedOut ? (timeoutMessage ?? "Subagent timed out.") : singleResult.output,
@@ -3522,6 +3600,8 @@ async function runSubagent(
 				attemptedModels: singleResult.attemptedModels,
 				modelAttempts: singleResult.modelAttempts,
 				totalCost: singleResult.totalCost,
+				runnableAt: stepStartTime,
+				queueDurationMs: 0,
 				artifactPaths: singleResult.artifactPaths,
 				transcriptPath: singleResult.transcriptPath,
 				transcriptError: singleResult.transcriptError,
@@ -3622,6 +3702,8 @@ async function runSubagent(
 				agent: seqStep.agent,
 				exitCode: stopped || childStopped ? 1 : timedOut ? 1 : childInterrupted ? 0 : singleResult.exitCode,
 				durationMs: stepEndTime - stepStartTime,
+				runnableAt: stepStartTime,
+				queueDurationMs: 0,
 				tokens: stepTokens,
 			}));
 			if (singleResult.completionGuardTriggered) {
@@ -3781,6 +3863,7 @@ async function runSubagent(
 		steps: statusPayload.steps.map((step) => ({
 			agent: step.agent,
 			status: step.status,
+			queueDurationMs: step.queueDurationMs,
 			durationMs: step.durationMs,
 		})),
 		summary,
@@ -3810,6 +3893,7 @@ async function runSubagent(
 			...(stopped ? { stopped: true, error: stopMessage } : timedOut ? { timedOut: true, error: timeoutMessage ?? "Subagent timed out." } : turnBudgetExceeded ? { error: statusPayload.error ?? "Subagent exceeded turn budget." } : {}),
 			results: results.map((r) => ({
 				agent: r.agent,
+				stepIndex: r.stepIndex,
 				context: r.context,
 				output: r.output,
 				error: r.error,
@@ -3830,6 +3914,8 @@ async function runSubagent(
 				attemptedModels: r.attemptedModels,
 				modelAttempts: r.modelAttempts,
 				totalCost: r.totalCost,
+				runnableAt: r.runnableAt,
+				queueDurationMs: r.queueDurationMs,
 				artifactPaths: r.artifactPaths,
 				truncated: r.truncated,
 				transcriptPath: r.transcriptPath,

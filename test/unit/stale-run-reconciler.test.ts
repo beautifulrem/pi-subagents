@@ -42,7 +42,7 @@ describe("async stale-run reconciliation", () => {
 				startedAt: 1000,
 				lastUpdate: 1000,
 				currentStep: 0,
-				steps: [{ agent: "scout", status: "running", startedAt: 1000 }],
+				steps: [{ agent: "scout", status: "running", runnableAt: 900, startedAt: 1000 }],
 			});
 
 			const result = reconcileAsyncRun(asyncDir, {
@@ -58,12 +58,16 @@ describe("async stale-run reconciliation", () => {
 			assert.equal(status.state, "failed");
 			assert.equal(status.sessionId, "session-current");
 			assert.equal(status.steps[0].status, "failed");
+			assert.equal(status.steps[0].runnableAt, 900);
+			assert.equal(status.steps[0].queueDurationMs, 100);
 			assert.match(status.steps[0].error, /process 12345 exited or disappeared/);
 			const resultJson = JSON.parse(fs.readFileSync(path.join(resultsDir, "run-dead.json"), "utf-8"));
 			assert.equal(resultJson.success, false);
 			assert.equal(resultJson.sessionId, "session-current");
 			assert.equal(resultJson.state, "failed");
 			assert.equal(resultJson.exitCode, 1);
+			assert.equal(resultJson.results[0].runnableAt, 900);
+			assert.equal(resultJson.results[0].queueDurationMs, 100);
 			assert.match(resultJson.summary, /process 12345 exited or disappeared/);
 			assert.match(fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8"), /subagent\.run\.repaired_stale/);
 		} finally {
@@ -164,8 +168,8 @@ describe("async stale-run reconciliation", () => {
 				success: false,
 				state: "failed",
 				results: [
-					{ agent: "scout", success: true, sessionFile: scoutSession, model: "fast", attemptedModels: ["planned-scout", "fast"] },
-					{ agent: "worker", success: false, error: "boom", sessionFile: workerSession, model: "careful", attemptedModels: ["planned-worker", "careful"] },
+					{ agent: "worker", stepIndex: 1, success: false, error: "boom", sessionFile: workerSession, model: "careful", attemptedModels: ["planned-worker", "careful"], runnableAt: 950, queueDurationMs: 150 },
+					{ agent: "scout", stepIndex: 0, success: true, sessionFile: scoutSession, model: "fast", attemptedModels: ["planned-scout", "fast"], runnableAt: 900, queueDurationMs: 100 },
 				],
 			}, null, 2), "utf-8");
 
@@ -181,13 +185,96 @@ describe("async stale-run reconciliation", () => {
 			assert.equal(result.status?.steps?.[0]?.exitCode, 0);
 			assert.equal(result.status?.steps?.[0]?.model, "fast");
 			assert.deepEqual(result.status?.steps?.[0]?.attemptedModels, ["planned-scout", "fast"]);
+			assert.equal(result.status?.steps?.[0]?.runnableAt, 900);
+			assert.equal(result.status?.steps?.[0]?.queueDurationMs, 100);
 			assert.equal(result.status?.steps?.[0]?.sessionFile, scoutSession);
 			assert.equal(result.status?.steps?.[1]?.status, "failed");
 			assert.equal(result.status?.steps?.[1]?.exitCode, 1);
 			assert.equal(result.status?.steps?.[1]?.error, "boom");
 			assert.equal(result.status?.steps?.[1]?.model, "careful");
 			assert.deepEqual(result.status?.steps?.[1]?.attemptedModels, ["planned-worker", "careful"]);
+			assert.equal(result.status?.steps?.[1]?.runnableAt, 950);
+			assert.equal(result.status?.steps?.[1]?.queueDurationMs, 150);
 			assert.equal(result.status?.steps?.[1]?.sessionFile, workerSession);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects negative queue timestamps from a stale result without rewriting status", () => {
+		const root = tempRoot("pi-stale-negative-queue-");
+		try {
+			const asyncDir = path.join(root, "run-negative-queue");
+			const resultsDir = path.join(root, "results");
+			fs.mkdirSync(resultsDir, { recursive: true });
+			writeStatus(asyncDir, {
+				runId: "run-negative-queue",
+				mode: "single",
+				state: "running",
+				pid: 12345,
+				startedAt: 1000,
+				lastUpdate: 1000,
+				steps: [{ agent: "worker", status: "running", startedAt: 1000 }],
+			});
+			fs.writeFileSync(path.join(resultsDir, "run-negative-queue.json"), JSON.stringify({
+				id: "run-negative-queue",
+				success: true,
+				state: "complete",
+				results: [{ agent: "worker", stepIndex: 0, success: true, runnableAt: -1, queueDurationMs: 0 }],
+			}), "utf-8");
+
+			assert.throws(
+				() => reconcileAsyncRun(asyncDir, { resultsDir, kill: () => { throw errno("ESRCH"); }, now: () => 2000 }),
+				/runnableAt must be a non-negative finite number/,
+			);
+			const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8"));
+			assert.equal(status.state, "running");
+			assert.equal(status.steps[0].runnableAt, undefined);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("repairs downstream status by stable step index across an empty dynamic placeholder", () => {
+		const root = tempRoot("pi-stale-empty-dynamic-index-");
+		try {
+			const asyncDir = path.join(root, "run-empty-dynamic-index");
+			const resultsDir = path.join(root, "results");
+			fs.mkdirSync(resultsDir, { recursive: true });
+			writeStatus(asyncDir, {
+				runId: "run-empty-dynamic-index",
+				mode: "chain",
+				state: "running",
+				pid: 12345,
+				startedAt: 1000,
+				lastUpdate: 1500,
+				steps: [
+					{ agent: "producer", status: "complete", startedAt: 1000, endedAt: 1100 },
+					{ agent: "expand:reviewer", status: "complete", startedAt: 1200, endedAt: 1200 },
+					{ agent: "consumer", status: "running", startedAt: 1500, model: "planned-consumer" },
+				],
+			});
+			fs.writeFileSync(path.join(resultsDir, "run-empty-dynamic-index.json"), JSON.stringify({
+				id: "run-empty-dynamic-index",
+				success: true,
+				state: "complete",
+				results: [
+					{ agent: "producer", stepIndex: 0, success: true },
+					{ agent: "consumer", stepIndex: 2, success: true, model: "actual-consumer", runnableAt: 1500, queueDurationMs: 0 },
+				],
+			}), "utf-8");
+
+			const result = reconcileAsyncRun(asyncDir, { resultsDir, kill: () => { throw errno("ESRCH"); }, now: () => 2000 });
+
+			assert.equal(result.repaired, true);
+			assert.equal(result.status?.state, "complete");
+			assert.equal(result.status?.steps?.[1]?.agent, "expand:reviewer");
+			assert.equal(result.status?.steps?.[1]?.model, undefined);
+			assert.equal(result.status?.steps?.[1]?.runnableAt, undefined);
+			assert.equal(result.status?.steps?.[2]?.status, "complete");
+			assert.equal(result.status?.steps?.[2]?.model, "actual-consumer");
+			assert.equal(result.status?.steps?.[2]?.runnableAt, 1500);
+			assert.equal(result.status?.steps?.[2]?.queueDurationMs, 0);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
