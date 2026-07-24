@@ -84,6 +84,7 @@ describe("registered subagent tool description", () => {
 		);
 		assert.match(description, /Dynamic expand step.*parallel:\{agent:.*expand:\{from:\{output:.*path:"\/items".*maxItems:4.*collect:\{as:/i);
 		assert.match(description, /parallel must be one template object, not an array.*must not also set agent/i);
+		assert.match(description, /seed uses outputSchema.*acceptance:\{level:"none",reason:"exact-output transform"\}/i);
 	});
 
 	it("offers a compact mode that keeps safety-critical guidance", () => {
@@ -125,6 +126,7 @@ describe("registered subagent tool description", () => {
 		assert.match(description, /count:/);
 		assert.match(description, /Dynamic expand step.*parallel:\{agent:.*expand:\{from:\{output:.*path:"\/items".*maxItems:4.*collect:\{as:/i);
 		assert.match(description, /parallel is one template object, not an array.*do not also set agent/i);
+		assert.match(description, /exact-JSON outputSchema seed.*canonical acceptance none/i);
 	});
 
 	it("renders a custom project description with placeholders and mandatory safety guidance", () => {
