@@ -1696,6 +1696,40 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.deepEqual(finalStatus.parallelGroups, [{ start: 1, count: 2, stepIndex: 1 }]);
 	});
 
+	it("escapes dynamic keys in async workflow labels and downstream headers", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		const maliciousKey = "safe\u2028\u009b\u202e";
+		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: maliciousKey }] } });
+		mockPi.onCall({ output: "reviewed" });
+		mockPi.onCall({ output: "consumed" });
+		const id = `async-dynamic-safe-key-${Date.now().toString(36)}`;
+		const result = executeAsyncChain(id, {
+			chain: [
+				{ agent: "producer", task: "Produce targets", as: "targets", outputSchema: { type: "object" } },
+				{
+					expand: { from: { output: "targets", path: "/items" }, key: "/path", maxItems: 1 },
+					parallel: { agent: "reviewer", task: "Review {item.path}" },
+					collect: { as: "reviews" },
+				},
+				{ agent: "consumer" },
+			],
+			agents: [makeAgent("producer"), makeAgent("reviewer"), makeAgent("consumer")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-dynamic-safe-key" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		assert.ok(!result.isError);
+		await waitForAsyncResultFile(id, 10_000);
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		const label = status.workflowGraph?.nodes?.[1]?.children?.[0]?.label ?? "";
+		const consumerTask = readMockPiArgs(mockPi, 2).at(-1) ?? "";
+		for (const text of [label, consumerTask]) {
+			for (const escaped of ["\\u{2028}", "\\u{9b}", "\\u{202e}"]) assert.equal(text.includes(escaped), true);
+			for (const control of ["\u2028", "\u009b", "\u202e"]) assert.equal(text.includes(control), false);
+		}
+	});
+
 	it("async chains expand dynamic fanout and persist collected output", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] } });
 		mockPi.onCall({ matchArgIncludes: "Review src/a.ts", output: "review-a", structuredOutput: { ok: "a" } });

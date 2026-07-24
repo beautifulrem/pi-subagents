@@ -4,6 +4,7 @@ import { ChainOutputValidationError, validateChainOutputBindings, validateChainO
 import {
 	DynamicFanoutError,
 	collectDynamicResults,
+	formatDynamicItemKey,
 	materializeDynamicParallelStep,
 	resolveJsonPointer,
 	validateDynamicCollection,
@@ -22,6 +23,14 @@ const outputs: ChainOutputMap = {
 };
 
 describe("dynamic fanout helpers", () => {
+	it("formats untrusted item keys for host-generated text", () => {
+		const key = `safe\u2028\u009b\u202e${"x".repeat(140)}`;
+		const formatted = formatDynamicItemKey(key);
+		for (const escaped of ["\\u{2028}", "\\u{9b}", "\\u{202e}"]) assert.equal(formatted.includes(escaped), true);
+		for (const control of ["\u2028", "\u009b", "\u202e"]) assert.equal(formatted.includes(control), false);
+		assert.ok(Array.from(JSON.parse(formatted.replace(/\\u\{([0-9a-f]+)\}/g, ""))).length <= 121);
+	});
+
 	it("resolves JSON Pointers and materializes item templates", () => {
 		assert.deepEqual(resolveJsonPointer({ items: [1, 2] }, "/items/1", "path"), 2);
 		const step: ChainStep = {

@@ -1,5 +1,6 @@
 import { isDynamicParallelStep, isParallelStep, type ChainStep, type SequentialStep } from "../../shared/settings.ts";
 import type { SingleResult, SubagentRunMode, WorkflowGraphNode, WorkflowGraphSnapshot, WorkflowNodeStatus } from "../../shared/types.ts";
+import { formatDynamicItemKey } from "./dynamic-fanout.ts";
 
 export interface WorkflowGraphBuildInput {
 	runId: string;
@@ -135,7 +136,7 @@ export function buildWorkflowGraphSnapshot(input: WorkflowGraphBuildInput): Work
 					kind: "agent",
 					agent: task.agent,
 					phase: step.parallel.phase ?? step.phase,
-					label: task.label?.trim() || step.parallel.label?.trim() || `${task.agent} ${task.itemKey}`,
+					label: task.label?.trim() || step.parallel.label?.trim() || `${task.agent} ${formatDynamicItemKey(task.itemKey)}`,
 					status,
 					flatIndex: task.flatIndex,
 					stepIndex,

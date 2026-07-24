@@ -113,6 +113,12 @@ function scalarToKey(value: unknown, label: string): string {
 	throw new DynamicFanoutError(`${label} must resolve to a string, number, or boolean.`);
 }
 
+export function formatDynamicItemKey(key: string): string {
+	const chars = Array.from(key);
+	const bounded = `${chars.slice(0, 120).join("")}${chars.length > 120 ? "…" : ""}`;
+	return JSON.stringify(bounded).replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, (character) => `\\u{${character.codePointAt(0)!.toString(16)}}`);
+}
+
 export function normalizeItemKeyForId(key: string): string {
 	const normalized = key
 		.toLowerCase()
@@ -231,7 +237,7 @@ export function resolveDynamicFanoutItems(step: DynamicParallelStep, outputs: Ch
 		const key = step.expand.key === undefined
 			? String(index)
 			: scalarToKey(resolveJsonPointer(item, step.expand.key, `Dynamic chain step ${stepIndex + 1} expand.key`), `Dynamic chain step ${stepIndex + 1} expand.key`);
-		if (seen.has(key)) throw new DynamicFanoutError(`Dynamic chain step ${stepIndex + 1} produced duplicate item key '${key}'.`);
+		if (seen.has(key)) throw new DynamicFanoutError(`Dynamic chain step ${stepIndex + 1} produced duplicate item key ${formatDynamicItemKey(key)}.`);
 		seen.add(key);
 		const idKey = normalizeItemKeyForId(key);
 		if (seenIds.has(idKey)) throw new DynamicFanoutError(`Dynamic chain step ${stepIndex + 1} produced colliding item id '${idKey}'.`);

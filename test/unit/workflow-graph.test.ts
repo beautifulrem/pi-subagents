@@ -104,6 +104,17 @@ describe("workflow graph snapshots", () => {
 		assert.equal(pausedThenFailed.nodes[0]?.status, "failed");
 	});
 
+	it("escapes dynamic item keys in generated workflow labels", () => {
+		const graph = buildWorkflowGraphSnapshot({
+			runId: "run-dynamic-key",
+			steps: [{ expand: { from: { output: "targets", path: "/items" }, maxItems: 1 }, parallel: { agent: "reviewer", task: "Review {item}" }, collect: { as: "reviews" } }],
+			dynamicChildren: { 0: [{ agent: "reviewer", flatIndex: 0, itemKey: "safe\u2028\u009b\u202e" }] },
+		});
+		const label = graph.nodes[0]?.children?.[0]?.label ?? "";
+		for (const escaped of ["\\u{2028}", "\\u{9b}", "\\u{202e}"]) assert.equal(label.includes(escaped), true);
+		for (const control of ["\u2028", "\u009b", "\u202e"]) assert.equal(label.includes(control), false);
+	});
+
 	it("uses dynamic group status overrides for empty or aggregate-failure fanout states", () => {
 		const steps = [{
 			expand: { from: { output: "targets", path: "/items" }, maxItems: 4 },

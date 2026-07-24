@@ -74,7 +74,7 @@ import { injectSingleOutputInstruction, validateFileOnlyOutputMode } from "../sh
 import { buildWorkflowGraphSnapshot } from "../shared/workflow-graph.ts";
 import { ChainOutputValidationError, outputEntryFromResult, resolveOutputReferences, validateChainOutputBindings } from "../shared/chain-outputs.ts";
 import { createStructuredOutputRuntime } from "../shared/structured-output.ts";
-import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelStep, validateDynamicCollection, type DynamicCollectedResult } from "../shared/dynamic-fanout.ts";
+import { collectDynamicResults, DynamicFanoutError, formatDynamicItemKey, materializeDynamicParallelStep, validateDynamicCollection, type DynamicCollectedResult } from "../shared/dynamic-fanout.ts";
 import { acceptanceFailureMessage, aggregateAcceptanceReport, evaluateAcceptance, resolveEffectiveAcceptance } from "../shared/acceptance.ts";
 import { isAgentContractV1 } from "../shared/agent-contract.ts";
 import type { ChainOutputMap } from "../../shared/types.ts";
@@ -453,12 +453,6 @@ interface ChainExecutionResult {
 	};
 }
 
-function displayChainItemKey(key: string): string {
-	const chars = Array.from(key);
-	const bounded = `${chars.slice(0, 120).join("")}${chars.length > 120 ? "…" : ""}`;
-	return JSON.stringify(bounded).replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, (character) => `\\u{${character.codePointAt(0)!.toString(16)}}`);
-}
-
 function terminalChainOutput(steps: ChainStep[], results: SingleResult[], outputs: ChainOutputMap, chainDir: string): string {
 	const finalStep = steps.at(-1);
 	if (!finalStep) return "";
@@ -470,7 +464,7 @@ function terminalChainOutput(steps: ChainStep[], results: SingleResult[], output
 		const items = collected as DynamicCollectedResult[];
 		output = aggregateParallelOutputs(
 			items.map((item) => ({ agent: item.agent, output: item.structured !== undefined ? JSON.stringify(item.structured) : item.text, exitCode: item.exitCode, error: item.error, timedOut: item.timedOut })),
-			(index, agent) => `=== Final item ${displayChainItemKey(items[index]?.key ?? String(index))}: ${agent} ===`,
+			(index, agent) => `=== Final item ${formatDynamicItemKey(items[index]?.key ?? String(index))}: ${agent} ===`,
 		);
 	} else if (isParallelStep(finalStep)) {
 		if (finalStep.parallel.length === 0) return "[]";
@@ -1058,7 +1052,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				.filter((result) => result.exitCode !== 0 && result.exitCode !== -1);
 			if (failures.length > 0) {
 				const failureSummary = failures
-					.map((failure) => `- Item ${failure.originalIndex + 1} (${failure.agent}, key ${displayChainItemKey(materialized.items[failure.originalIndex]?.key ?? String(failure.originalIndex))}): ${failure.error || "failed"}`)
+					.map((failure) => `- Item ${failure.originalIndex + 1} (${failure.agent}, key ${formatDynamicItemKey(materialized.items[failure.originalIndex]?.key ?? String(failure.originalIndex))}): ${failure.error || "failed"}`)
 					.join("\n");
 				const errorMsg = `Dynamic step ${stepIndex + 1} failed:\n${failureSummary}`;
 				dynamicGroupStatuses[stepIndex] = { status: "failed", error: errorMsg };
@@ -1080,7 +1074,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				.filter(({ result, task }) => isAgentContractV1(task?.agentContract ?? dynamicParallelStep.agentContract ?? params.agentContract) && (task?.gateOn ?? dynamicParallelStep.gateOn) === "acceptance" && result.acceptance?.status === "rejected");
 			if (acceptanceFailures.length > 0) {
 				const acceptanceSummary = acceptanceFailures
-					.map(({ result, originalIndex }) => `- Item ${originalIndex + 1} (${result.agent}, key ${displayChainItemKey(materialized.items[originalIndex]?.key ?? String(originalIndex))}): ${acceptanceFailureMessage(result.acceptance) ?? "acceptance rejected"}`)
+					.map(({ result, originalIndex }) => `- Item ${originalIndex + 1} (${result.agent}, key ${formatDynamicItemKey(materialized.items[originalIndex]?.key ?? String(originalIndex))}): ${acceptanceFailureMessage(result.acceptance) ?? "acceptance rejected"}`)
 					.join("\n");
 				const errorMsg = `Dynamic step ${stepIndex + 1} acceptance gate failed:\n${acceptanceSummary}`;
 				dynamicGroupStatuses[stepIndex] = { status: "failed", error: errorMsg };
@@ -1140,7 +1134,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				error: result.error,
 				timedOut: result.timedOut,
 			}));
-			prev = aggregateParallelOutputs(taskResults, (i, agent) => `=== Dynamic Item ${i + 1} (${agent}, key ${displayChainItemKey(materialized.items[i]?.key ?? String(i))}) ===`);
+			prev = aggregateParallelOutputs(taskResults, (i, agent) => `=== Dynamic Item ${i + 1} (${agent}, key ${formatDynamicItemKey(materialized.items[i]?.key ?? String(i))}) ===`);
 		} else {
 			const seqStep = step as SequentialStep;
 			const stepTemplate = stepTemplates as string;

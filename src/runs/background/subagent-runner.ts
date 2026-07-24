@@ -62,7 +62,7 @@ import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-a
 import { outputEntryFromAsyncResult, resolveOutputReferences } from "../shared/chain-outputs.ts";
 import { createStructuredOutputRuntime, readStructuredOutput } from "../shared/structured-output.ts";
 import { readChildToolDiagnosticError } from "../shared/tool-availability.ts";
-import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelStep, validateDynamicCollection } from "../shared/dynamic-fanout.ts";
+import { collectDynamicResults, DynamicFanoutError, formatDynamicItemKey, materializeDynamicParallelStep, validateDynamicCollection } from "../shared/dynamic-fanout.ts";
 import { nestedSummaryFromAsyncStatus, projectNestedEvents, resolveNestedAsyncDir, writeNestedEvent } from "../shared/nested-events.ts";
 import { formatModelAttemptNote, isRetryableModelFailure } from "../shared/model-fallback.ts";
 import { createSteeringStatus, recordSteeringRequest, steeringStatus, terminalSteeringNoticeState, updateSteeringTarget } from "./steering.ts";
@@ -2876,7 +2876,7 @@ async function runSubagent(
 						kind: "agent",
 						agent: step.parallel.agent,
 						phase: dynamicSteps[itemIndex]?.phase ?? step.phase,
-						label: dynamicSteps[itemIndex]?.label?.trim() || `${step.parallel.agent} ${item.key}`,
+						label: dynamicSteps[itemIndex]?.label?.trim() || `${step.parallel.agent} ${formatDynamicItemKey(item.key)}`,
 						status: "pending",
 						flatIndex: groupStartFlatIndex + itemIndex,
 						stepIndex,
@@ -3043,7 +3043,7 @@ async function runSubagent(
 				.filter(({ result, task }) => isAgentContractV1(task?.agentContract ?? step.agentContract) && task?.gateOn === "acceptance" && result.acceptance?.status === "rejected");
 			if (acceptanceFailures.length > 0) {
 				const message = acceptanceFailures
-					.map(({ result, originalIndex }) => `Dynamic item ${originalIndex + 1} (${result.agent}, key ${materialized.items[originalIndex]?.key ?? originalIndex}) acceptance rejected: ${acceptanceFailureMessage(result.acceptance) ?? "acceptance rejected"}`)
+					.map(({ result, originalIndex }) => `Dynamic item ${originalIndex + 1} (${result.agent}, key ${formatDynamicItemKey(materialized.items[originalIndex]?.key ?? String(originalIndex))}) acceptance rejected: ${acceptanceFailureMessage(result.acceptance) ?? "acceptance rejected"}`)
 					.join("\n");
 				results.push({ agent: step.parallel.agent, context: step.parallel.context, output: message, error: message, success: false, exitCode: 1, structuredOutput: collection });
 				statusPayload.error = message;
@@ -3109,7 +3109,7 @@ async function runSubagent(
 					exitCode: r.exitCode,
 					error: r.error,
 				})),
-				(i, agent) => `=== Dynamic Item ${i + 1} (${agent}, key ${materialized.items[i]?.key ?? i}) ===`,
+				(i, agent) => `=== Dynamic Item ${i + 1} (${agent}, key ${formatDynamicItemKey(materialized.items[i]?.key ?? String(i))}) ===`,
 			);
 			appendJsonl(eventsPath, JSON.stringify({
 				type: "subagent.dynamic.completed",
