@@ -268,6 +268,7 @@ class JsonRpcLspClient {
 		child.stderr.on("data", (chunk: Buffer) => {
 			this.stderr = `${this.stderr}${chunk.toString("utf-8")}`.slice(-MAX_STDERR_LENGTH);
 		});
+		child.stdin.on("error", (error) => this.rejectPending(error));
 		child.on("error", (error) => {
 			this.exited = true;
 			this.rejectPending(error);
