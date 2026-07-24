@@ -1317,6 +1317,8 @@ export interface ExtensionConfig {
 	worktreeBaseDir?: string;
 	/** Where to store subagent artifact files. Defaults to "project" (cwd/.pi-subagents). Set to "session" for pi session dir, or "temp" for OS temp. */
 	artifactDir?: ArtifactDirPreference;
+	/** Relay full subagent results through an external intercom adapter. Defaults to true. */
+	resultIntercom?: boolean;
 	intercomBridge?: IntercomBridgeConfig;
 	proactiveSkillSubagents?: ProactiveSkillSubagentsConfig | false;
 	scheduledRuns?: ScheduledRunsConfig;
