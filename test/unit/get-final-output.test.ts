@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Message } from "@earendil-works/pi-ai";
-import { getFinalOutput } from "../../src/shared/utils.ts";
+import { getFinalOutput, mergeResultWarnings } from "../../src/shared/utils.ts";
 
 function assistantContent(content: unknown[]): Message {
 	return { role: "assistant", content } as unknown as Message;
 }
+
+describe("mergeResultWarnings", () => {
+	it("keeps distinct execution and output-save diagnostics without duplicates", () => {
+		assert.equal(mergeResultWarnings({ error: "missing expected file", outputSaveError: "ENOTDIR" }), "missing expected file\nENOTDIR");
+		assert.equal(mergeResultWarnings({ error: "same", outputSaveError: "same" }), "same");
+		assert.equal(mergeResultWarnings({}), undefined);
+	});
+});
 
 describe("getFinalOutput", () => {
 	it("uses the last non-empty text part in the latest assistant message", () => {

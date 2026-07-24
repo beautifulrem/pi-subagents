@@ -206,11 +206,12 @@ describe("dynamic fanout helpers", () => {
 			finalOutput: "ok",
 			structuredOutput,
 		});
-		const timedOut = { ...result("reviewer", { ok: "b" }), exitCode: 1, error: "Subagent timed out after 300ms.", timedOut: true };
+		const timedOut = { ...result("reviewer", { ok: "b" }), exitCode: 1, error: "Subagent timed out after 300ms.", outputSaveError: "Failed to save output.", timedOut: true };
 		const collected = collectDynamicResults(step, materialized.items, [result("reviewer", { ok: "a" }), timedOut]);
 		assert.deepEqual(collected.map((item) => item.key), ["src/a.ts", "src/b.ts"]);
 		assert.deepEqual(collected.map((item) => item.structured), [{ ok: "a" }, { ok: "b" }]);
 		assert.equal(collected[1]?.timedOut, true);
+		assert.equal(collected[1]?.error, "Subagent timed out after 300ms.\nFailed to save output.");
 		await assert.doesNotReject(validateDynamicCollection({ type: "array", minItems: 2 }, collected));
 		await assert.rejects(validateDynamicCollection({ type: "object" }, collected), DynamicFanoutError);
 	});

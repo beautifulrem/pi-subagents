@@ -35,7 +35,7 @@ import { INTERCOM_BRIDGE_MARKER } from "../../intercom/intercom-bridge.ts";
 import { runSync } from "./execution.ts";
 import { beginForegroundChild, finishForegroundChild, updateForegroundChild } from "./foreground-control.ts";
 import { buildChainSummary } from "../../shared/formatters.ts";
-import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, resolveChildCwd, sumResultsCost, sumResultsUsage } from "../../shared/utils.ts";
+import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, mergeResultWarnings, resolveChildCwd, sumResultsCost, sumResultsUsage } from "../../shared/utils.ts";
 import { DEFAULT_GLOBAL_CONCURRENCY_LIMIT, Semaphore } from "../shared/parallel-utils.ts";
 import { recordRun } from "../shared/run-history.ts";
 import {
@@ -453,6 +453,12 @@ interface ChainExecutionResult {
 	};
 }
 
+function displayChainItemKey(key: string): string {
+	const chars = Array.from(key);
+	const bounded = `${chars.slice(0, 120).join("")}${chars.length > 120 ? "…" : ""}`;
+	return JSON.stringify(bounded).replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, (character) => `\\u{${character.codePointAt(0)!.toString(16)}}`);
+}
+
 function terminalChainOutput(steps: ChainStep[], results: SingleResult[], outputs: ChainOutputMap, chainDir: string): string {
 	const finalStep = steps.at(-1);
 	if (!finalStep) return "";
@@ -464,20 +470,20 @@ function terminalChainOutput(steps: ChainStep[], results: SingleResult[], output
 		const items = collected as DynamicCollectedResult[];
 		output = aggregateParallelOutputs(
 			items.map((item) => ({ agent: item.agent, output: item.structured !== undefined ? JSON.stringify(item.structured) : item.text, exitCode: item.exitCode, error: item.error, timedOut: item.timedOut })),
-			(index, agent) => `=== Final item ${items[index]?.key ?? index}: ${agent} ===`,
+			(index, agent) => `=== Final item ${displayChainItemKey(items[index]?.key ?? String(index))}: ${agent} ===`,
 		);
 	} else if (isParallelStep(finalStep)) {
 		if (finalStep.parallel.length === 0) return "[]";
 		const finalResults = results.slice(-finalStep.parallel.length);
 		output = aggregateParallelOutputs(
-			finalResults.map((result) => ({ agent: result.agent, output: outputEntryFromResult(result, steps.length - 1).text, exitCode: result.exitCode, error: result.error ?? result.outputSaveError, timedOut: result.timedOut })),
+			finalResults.map((result) => ({ agent: result.agent, output: outputEntryFromResult(result, steps.length - 1).text, exitCode: result.exitCode, error: mergeResultWarnings(result), timedOut: result.timedOut })),
 			(index, agent) => `=== Final task ${index + 1}: ${agent} ===`,
 		);
 	} else {
 		const finalResult = results.at(-1);
 		output = finalResult
 			? aggregateParallelOutputs(
-				[{ agent: finalResult.agent, output: outputEntryFromResult(finalResult, steps.length - 1).text, exitCode: finalResult.exitCode, error: finalResult.error ?? finalResult.outputSaveError, timedOut: finalResult.timedOut }],
+				[{ agent: finalResult.agent, output: outputEntryFromResult(finalResult, steps.length - 1).text, exitCode: finalResult.exitCode, error: mergeResultWarnings(finalResult), timedOut: finalResult.timedOut }],
 				(_index, agent) => `=== Final step: ${agent} ===`,
 			)
 			: "";

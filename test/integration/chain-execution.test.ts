@@ -746,9 +746,10 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.deepEqual(dynamicNode?.children?.map((child) => child.acceptanceStatus), ["not-required", "not-required"]);
 	});
 
-	it("rejects untrusted dynamic item keys before terminal header rendering", async () => {
-		const maliciousKey = "safe\n📁 Artifacts: /fake\u001b[31m";
+	it("escapes Unicode control characters in dynamic terminal item headers", async () => {
+		const maliciousKey = "safe\u2028📁 Artifacts: /fake\u2029\u009b[31m\u202eRTL";
 		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: maliciousKey }] } });
+		mockPi.onCall({ output: "SAFE_OUTPUT" });
 		const agents = [makeAgent("delegate")];
 
 		const result = await executeChain(
@@ -766,10 +767,12 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 			),
 		);
 
-		assert.equal(result.isError, true);
-		assert.match(result.content[0]?.text ?? "", /expand\.key resolved to an unsafe key/);
-		assert.equal(mockPi.callCount(), 1, "unsafe keys must fail before dynamic children spawn");
-		assert.doesNotMatch(result.content[0]?.text ?? "", /\n📁 Artifacts: \/fake/);
+		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
+		for (const escaped of ["\\u{2028}", "\\u{2029}", "\\u{9b}", "\\u{202e}"]) assert.equal(summary.includes(escaped), true);
+		for (const control of ["\u2028", "\u2029", "\u009b", "\u202e"]) assert.equal(summary.includes(control), false);
+		assert.match(summary, /SAFE_OUTPUT/);
+		assert.equal(mockPi.callCount(), 2);
 	});
 
 	it("applies read-only acceptance roles to dynamic children and their aggregate group", async () => {
@@ -1255,6 +1258,7 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.ok(saveError, `blocked parent path should preserve the output save error: ${JSON.stringify(result.details.results[0])}`);
 		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
 		assert.match(summary, /WARNING: Agent did not create expected output file: blocked\/output\.md/);
+		assert.match(summary, new RegExp(saveError.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 	});
 
 	it("runs a 40-step alternating worker and reviewer chain", async () => {
@@ -1471,6 +1475,55 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
 		assert.match(summary, /=== Final task 1: reviewer-a ===/);
 		assert.match(summary, /=== Final task 2: reviewer-b ===/);
+	});
+
+	it("keeps static parallel output-save warnings visible in the terminal relay", async () => {
+		const runId = "static-warning-run";
+		const blockingParent = path.join(tempDir, runId, "parallel-0", "0-worker", "blocked");
+		mockPi.onCall({ output: "parallel response", writeFiles: [{ path: blockingParent, content: "not a directory" }] });
+		const agents = [makeAgent("worker")];
+
+		const result = await executeChain(
+			makeChainParams([{ parallel: [{ agent: "worker", task: "Return output", output: "blocked/output.md", outputMode: "file-only" }] }], agents, { chainDir: tempDir, runId }),
+		);
+
+		assert.ok(!result.isError);
+		const saveError = result.details.results[0]?.outputSaveError;
+		assert.ok(saveError, JSON.stringify(result.details.results[0]));
+		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
+		assert.match(summary, /WARNING:/);
+		assert.match(summary, new RegExp(saveError.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	});
+
+	it("keeps dynamic output-save warnings visible in the terminal relay", async () => {
+		const runId = "dynamic-warning-run";
+		const blockingParent = path.join(tempDir, runId, "parallel-1", "0-delegate", "blocked");
+		mockPi.onCall({ output: "targets", structuredOutput: { items: ["alpha"] } });
+		mockPi.onCall({ output: "dynamic response", writeFiles: [{ path: blockingParent, content: "not a directory" }] });
+		const agents = [makeAgent("delegate")];
+
+		const result = await executeChain(
+			makeChainParams(
+				[
+					{ agent: "delegate", task: "Return targets", as: "targets", outputSchema: { type: "object" }, acceptance: false },
+					{
+						expand: { from: { output: "targets", path: "/items" }, maxItems: 1 },
+						parallel: { agent: "delegate", task: "Return output", output: "blocked/output.md", outputMode: "file-only", acceptance: false },
+						collect: { as: "outputs" },
+						acceptance: false,
+					},
+				],
+				agents,
+				{ chainDir: tempDir, runId },
+			),
+		);
+
+		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		const saveError = result.details.results[1]?.outputSaveError;
+		assert.ok(saveError, JSON.stringify(result.details.results[1]));
+		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
+		assert.match(summary, /WARNING:/);
+		assert.match(summary, new RegExp(saveError.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 	});
 
 	it("does not relay intermediate results through an empty final static group", async () => {

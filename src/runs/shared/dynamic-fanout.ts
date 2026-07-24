@@ -1,6 +1,6 @@
 import type { DynamicParallelStep, ParallelTaskItem } from "../../shared/settings.ts";
 import type { ArtifactPaths, ChainOutputMap, JsonSchemaObject, SingleResult } from "../../shared/types.ts";
-import { getSingleResultOutput } from "../../shared/utils.ts";
+import { getSingleResultOutput, mergeResultWarnings } from "../../shared/utils.ts";
 import { validateStructuredOutputValue } from "./structured-output.ts";
 
 export class DynamicFanoutError extends Error {}
@@ -264,13 +264,14 @@ export function materializeDynamicParallelStep(step: DynamicParallelStep, output
 export function collectDynamicResults(
 	step: DynamicParallelStep,
 	items: DynamicMaterializedItem[],
-	results: Array<Pick<SingleResult, "agent" | "exitCode" | "error" | "timedOut" | "stopped" | "structuredOutput" | "artifactPaths" | "savedOutputPath"> & { output?: string; finalOutput?: string }>,
+	results: Array<Pick<SingleResult, "agent" | "exitCode" | "error" | "outputSaveError" | "timedOut" | "stopped" | "structuredOutput" | "artifactPaths" | "savedOutputPath"> & { output?: string; finalOutput?: string }>,
 ): DynamicCollectedResult[] {
 	return items.map((entry, index) => {
 		const result = results[index];
 		const text = result
 			? ("output" in result && typeof result.output === "string" ? result.output : getSingleResultOutput(result as SingleResult))
 			: "";
+		const warning = result ? mergeResultWarnings(result) : undefined;
 		return {
 			key: entry.key,
 			index: entry.index,
@@ -279,7 +280,7 @@ export function collectDynamicResults(
 			exitCode: result?.exitCode ?? null,
 			text,
 			...(result?.structuredOutput !== undefined ? { structured: result.structuredOutput } : {}),
-			...(result?.error || result?.outputSaveError ? { error: result.error ?? result.outputSaveError } : {}),
+			...(warning ? { error: warning } : {}),
 			...(result?.timedOut ? { timedOut: true } : {}),
 			...(result?.stopped ? { stopped: true } : {}),
 			...(result?.savedOutputPath ? { outputPath: result.savedOutputPath } : {}),

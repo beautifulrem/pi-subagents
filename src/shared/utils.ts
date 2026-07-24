@@ -298,6 +298,11 @@ export function getSingleResultOutput(result: Pick<SingleResult, "finalOutput" |
 	return result.finalOutput ?? getFinalOutput(result.messages ?? []);
 }
 
+export function mergeResultWarnings(result: Pick<SingleResult, "error" | "outputSaveError">): string | undefined {
+	const warnings = [...new Set([result.error, result.outputSaveError].filter((warning): warning is string => Boolean(warning)))];
+	return warnings.length > 0 ? warnings.join("\n") : undefined;
+}
+
 /**
  * Extract display items (text and tool calls) from messages
  */
