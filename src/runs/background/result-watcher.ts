@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { buildCompletionKey, markSeenWithTtl } from "./completion-dedupe.ts";
@@ -24,9 +25,7 @@ const WATCHER_RESTART_DELAY_MS = 3000;
 const POLL_INTERVAL_MS = 3000;
 const RETRY_DELAY_MS = 100;
 
-type ResultWatcherFs = Pick<typeof fs, "existsSync" | "readFileSync" | "unlinkSync" | "renameSync" | "lstatSync" | "readdirSync" | "mkdirSync" | "realpathSync" | "watch">;
-
-type ResultFileIdentity = Pick<fs.Stats, "dev" | "ino" | "size" | "mtimeMs">;
+type ResultWatcherFs = Pick<typeof fs, "existsSync" | "readFileSync" | "unlinkSync" | "renameSync" | "readdirSync" | "mkdirSync" | "realpathSync" | "watch">;
 
 type ResultWatcherTimers = {
 	setTimeout: typeof setTimeout;
@@ -124,46 +123,40 @@ export function createResultWatcher(
 	};
 
 	const scheduleResult = (file: string, triggerTurn: boolean, delayMs = 0) => {
+		if (!deliveryActive) return;
 		const pendingMode = pendingTriggerTurn.get(file);
 		pendingTriggerTurn.set(file, pendingMode === false || !triggerTurn ? false : true);
 		state.resultFileCoalescer.schedule(file, delayMs);
 	};
 
-	const sameResultFile = (left: ResultFileIdentity, right: ResultFileIdentity) =>
-		left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeMs === right.mtimeMs;
-
-	let claimSequence = 0;
-	const removeReadResult = (resultPath: string, file: string, identity: ResultFileIdentity, triggerTurn: boolean): void => {
-		const claimPath = `${resultPath}.${process.pid}.${++claimSequence}.processing`;
-		const preserveClaim = () => {
-			if (!fsApi.existsSync(claimPath)) {
-				if (fsApi.existsSync(resultPath)) scheduleResult(file, triggerTurn, RETRY_DELAY_MS);
-				return;
-			}
-			if (!fsApi.existsSync(resultPath)) {
-				fsApi.renameSync(claimPath, resultPath);
-				scheduleResult(file, triggerTurn, RETRY_DELAY_MS);
-				return;
-			}
-			const retryFile = file.replace(/\.json$/i, `.replacement-${process.pid}-${claimSequence}.json`);
-			fsApi.renameSync(claimPath, path.join(resultsDir, retryFile));
-			scheduleResult(retryFile, triggerTurn, RETRY_DELAY_MS);
-			scheduleResult(file, triggerTurn, RETRY_DELAY_MS);
-		};
+	const processingDir = path.join(resultsDir, ".processing");
+	const claimFileName = (file: string) => `claim-${randomUUID()}-${encodeURIComponent(file)}.processing`;
+	const claimedOriginalFile = (claim: string): string | undefined => {
+		const match = claim.match(/^claim-[0-9a-f-]{36}-(.+)\.processing$/i);
+		if (!match) return undefined;
 		try {
-			fsApi.renameSync(resultPath, claimPath);
-			const claimedIdentity = fsApi.lstatSync(claimPath);
-			if (sameResultFile(identity, claimedIdentity)) {
-				fsApi.unlinkSync(claimPath);
-				return;
-			}
-			preserveClaim();
-		} catch (error) {
-			if (!isNotFound(error)) console.error(`Failed to remove delivered subagent result '${resultPath}' safely; will retry:`, error);
+			const file = decodeURIComponent(match[1]!);
+			return path.basename(file) === file && file.endsWith(".json") ? file : undefined;
+		} catch {
+			return undefined;
+		}
+	};
+	const restoreClaim = (claimPath: string, file: string, triggerTurn: boolean, schedule = true) => {
+		if (!fsApi.existsSync(claimPath)) return;
+		let targetFile = file;
+		if (fsApi.existsSync(path.join(resultsDir, targetFile))) targetFile = file.replace(/\.json$/i, `.recovered-${randomUUID()}.json`);
+		fsApi.renameSync(claimPath, path.join(resultsDir, targetFile));
+		if (schedule) scheduleResult(targetFile, triggerTurn, RETRY_DELAY_MS);
+	};
+	const recoverClaims = (triggerTurn: boolean) => {
+		fsApi.mkdirSync(processingDir, { recursive: true });
+		for (const claim of fsApi.readdirSync(processingDir)) {
+			const file = claimedOriginalFile(claim);
+			if (!file) continue;
 			try {
-				preserveClaim();
-			} catch (preserveError) {
-				console.error(`Failed to preserve claimed subagent result '${claimPath}':`, preserveError);
+				restoreClaim(path.join(processingDir, claim), file, triggerTurn, false);
+			} catch (error) {
+				console.error(`Failed to recover claimed subagent result '${path.join(processingDir, claim)}':`, error);
 			}
 		}
 	};
@@ -172,19 +165,19 @@ export function createResultWatcher(
 		const resultPath = path.join(resultsDir, file);
 		if (processing.has(file) || !fsApi.existsSync(resultPath)) return;
 		processing.add(file);
+		let claimPath: string | undefined;
+		let didClaim = false;
 		try {
-			const beforeRead = fsApi.lstatSync(resultPath);
-			if (!beforeRead.isFile() || beforeRead.isSymbolicLink()) throw new Error(`Subagent result path must be a real file: ${resultPath}`);
-			const rawResult = fsApi.readFileSync(resultPath, "utf-8");
-			const readIdentity = fsApi.lstatSync(resultPath);
-			if (!sameResultFile(beforeRead, readIdentity)) {
-				scheduleResult(file, triggerTurn, RETRY_DELAY_MS);
-				return;
-			}
-			const data = JSON.parse(rawResult) as ResultFileData;
-			if (typeof data.sessionId !== "string" || !data.sessionId) return;
+			const preview = JSON.parse(fsApi.readFileSync(resultPath, "utf-8")) as ResultFileData;
+			if (typeof preview.sessionId !== "string" || !preview.sessionId) return;
 			const epoch = deliveryEpoch;
-			if (!ownsSession(data.sessionId, epoch)) return;
+			if (!ownsSession(preview.sessionId, epoch)) return;
+			fsApi.mkdirSync(processingDir, { recursive: true });
+			claimPath = path.join(processingDir, claimFileName(file));
+			fsApi.renameSync(resultPath, claimPath);
+			didClaim = true;
+			const data = JSON.parse(fsApi.readFileSync(claimPath, "utf-8")) as ResultFileData;
+			if (typeof data.sessionId !== "string" || !ownsSession(data.sessionId, epoch)) return;
 
 			const runId = data.runId ?? data.id ?? file.replace(/\.json$/i, "");
 			const hasExplicitNestedChildren = data.nestedChildren !== undefined;
@@ -204,8 +197,9 @@ export function createResultWatcher(
 			if (lastSeenAt !== undefined && Date.now() - lastSeenAt > completionTtlMs) {
 				state.completionSeen.delete(completionKey);
 			} else if (lastSeenAt !== undefined) {
-				if (!ownsSession(data.sessionId, epoch) || !fsApi.existsSync(resultPath)) return;
-				removeReadResult(resultPath, file, readIdentity, triggerTurn);
+				if (!ownsSession(data.sessionId, epoch)) return;
+				fsApi.unlinkSync(claimPath);
+				claimPath = undefined;
 				return;
 			}
 
@@ -306,12 +300,21 @@ export function createResultWatcher(
 			} catch (error) {
 				console.error(`Completion observer failed for '${resultPath}':`, error);
 			}
-			if (!ownsSession(data.sessionId, epoch) || !fsApi.existsSync(resultPath)) return;
-			removeReadResult(resultPath, file, readIdentity, triggerTurn);
+			if (!ownsSession(data.sessionId, epoch)) return;
+			fsApi.unlinkSync(claimPath);
+			claimPath = undefined;
 		} catch (error) {
 			if (!isNotFound(error)) console.error(`Failed to process subagent result file '${resultPath}':`, error);
 		} finally {
+			if (claimPath && fsApi.existsSync(claimPath)) {
+				try {
+					restoreClaim(claimPath, file, triggerTurn);
+				} catch (error) {
+					console.error(`Failed to restore claimed subagent result '${claimPath}':`, error);
+				}
+			}
 			processing.delete(file);
+			if (didClaim && fsApi.existsSync(resultPath)) scheduleResult(file, triggerTurn, RETRY_DELAY_MS);
 		}
 	};
 
@@ -324,6 +327,7 @@ export function createResultWatcher(
 	const primeExistingResults = (options: { triggerTurn?: boolean } = {}) => {
 		try {
 			const triggerTurn = options.triggerTurn !== false;
+			recoverClaims(triggerTurn);
 			fsApi.readdirSync(resultsDir)
 				.filter((f) => f.endsWith(".json"))
 				.forEach((file) => scheduleResult(file, triggerTurn));

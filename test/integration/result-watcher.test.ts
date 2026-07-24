@@ -1111,6 +1111,86 @@ describe("result watcher", () => {
 		}
 	});
 
+	it("recovers a durable pre-delivery claim after watcher restart", async () => {
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-claim-recovery-"));
+		try {
+			const state = createState();
+			state.currentSessionId = "session-1";
+			const delivered: string[] = [];
+			const watcher = createResultWatcher({ events: { on: () => () => {}, emit() {} } }, state, resultsDir, 60_000, {
+				notifier: { async deliver(result) { delivered.push(String(result.id)); return true; } },
+			});
+			const processingDir = path.join(resultsDir, ".processing");
+			fs.mkdirSync(processingDir);
+			const claim = `claim-12345678-1234-1234-1234-123456789abc-${encodeURIComponent("crashed.json")}.processing`;
+			fs.writeFileSync(path.join(processingDir, claim), JSON.stringify({ id: "crash-claimed", sessionId: "session-1", agent: "worker", success: true, summary: "recovered" }), "utf-8");
+			try {
+				watcher.primeExistingResults();
+				const deadline = Date.now() + 1000;
+				while (!delivered.includes("crash-claimed") && Date.now() <= deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+			} finally {
+				watcher.stopResultWatcher();
+			}
+			assert.deepEqual(delivered, ["crash-claimed"]);
+			assert.deepEqual(fs.readdirSync(processingDir), []);
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+	});
+
+	it("recovers a durable claim after unlink and immediate restore both fail", async () => {
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-claim-failure-"));
+		try {
+			const state = createState();
+			state.currentSessionId = "session-1";
+			let deliveries = 0;
+			let failUnlink = true;
+			let failRestore = true;
+			const originalError = console.error;
+			console.error = () => {};
+			const watcher = createResultWatcher({ events: { on: () => () => {}, emit() {} } }, state, resultsDir, 60_000, {
+				fs: {
+					...fs,
+					unlinkSync(target) {
+						if (failUnlink && String(target).includes(`${path.sep}.processing${path.sep}`)) {
+							failUnlink = false;
+							const error = new Error("busy claim") as NodeJS.ErrnoException;
+							error.code = "EBUSY";
+							throw error;
+						}
+						return fs.unlinkSync(target);
+					},
+					renameSync(source, target) {
+						if (failRestore && String(source).includes(`${path.sep}.processing${path.sep}`) && String(target).endsWith("claim-failure.json")) {
+							failRestore = false;
+							const error = new Error("busy restore") as NodeJS.ErrnoException;
+							error.code = "EBUSY";
+							throw error;
+						}
+						return fs.renameSync(source, target);
+					},
+				},
+				notifier: { async deliver() { deliveries += 1; return true; } },
+			});
+			fs.writeFileSync(path.join(resultsDir, "claim-failure.json"), JSON.stringify({ id: "claim-failure", sessionId: "session-1", agent: "worker", success: true, summary: "done" }), "utf-8");
+			try {
+				watcher.primeExistingResults();
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				assert.equal(fs.readdirSync(path.join(resultsDir, ".processing")).length, 1);
+				watcher.primeExistingResults();
+				const deadline = Date.now() + 1000;
+				while (fs.readdirSync(path.join(resultsDir, ".processing")).length > 0 && Date.now() <= deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+			} finally {
+				watcher.stopResultWatcher();
+				console.error = originalError;
+			}
+			assert.equal(deliveries, 1);
+			assert.deepEqual(fs.readdirSync(path.join(resultsDir, ".processing")), []);
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+	});
+
 	it("drops stale watcher authority without emitting or deleting", async () => {
 		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-stale-"));
 		try {
