@@ -1060,7 +1060,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 			};
 			dynamicGroupStatuses[stepIndex] = { status: "completed" };
 			const effectiveGroupAcceptance = resolveEffectiveAcceptance({
-				explicit: step.acceptance,
+				explicit: step.acceptance ?? params.acceptance,
 				agentName: step.parallel.agent,
 				acceptanceRole: agents.find((agent) => agent.name === step.parallel.agent)?.acceptanceRole,
 				task: materialized.parallel

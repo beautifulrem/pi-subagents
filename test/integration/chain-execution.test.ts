@@ -697,6 +697,7 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 					},
 				],
 				agents,
+				{ acceptance: false },
 			),
 		);
 
@@ -704,6 +705,37 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		const dynamicNode = result.details.workflowGraph?.nodes[1];
 		assert.equal(dynamicNode?.acceptanceStatus, "checked");
 		assert.deepEqual(dynamicNode?.children?.map((child) => child.acceptanceStatus), ["checked", "checked"]);
+	});
+
+	it("inherits top-level disabled acceptance for dynamic children and their aggregate group", async () => {
+		mockPi.onCall({
+			output: "targets",
+			structuredOutput: { items: ["alpha", "beta"] },
+		});
+		mockPi.onCall({ output: "EXACT_alpha" });
+		mockPi.onCall({ output: "EXACT_beta" });
+		const agents = [makeAgent("delegate")];
+
+		const result = await executeChain(
+			makeChainParams(
+				[
+					{ agent: "delegate", task: "Return targets", as: "targets", outputSchema: { type: "object" }, acceptance: false },
+					{
+						expand: { from: { output: "targets", path: "/items" }, maxItems: 2 },
+						parallel: { agent: "delegate", task: "Reply exactly EXACT_{item}", acceptance: false },
+						collect: { as: "outputs" },
+					},
+				],
+				agents,
+				{ acceptance: false },
+			),
+		);
+
+		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		assert.deepEqual(result.details.results.map((child) => child.acceptance?.status), ["not-required", "not-required", "not-required"]);
+		const dynamicNode = result.details.workflowGraph?.nodes[1];
+		assert.equal(dynamicNode?.acceptanceStatus, "not-required");
+		assert.deepEqual(dynamicNode?.children?.map((child) => child.acceptanceStatus), ["not-required", "not-required"]);
 	});
 
 	it("applies read-only acceptance roles to dynamic children and their aggregate group", async () => {
