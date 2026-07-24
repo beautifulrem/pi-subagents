@@ -52,7 +52,7 @@ describe("registered subagent tool description", () => {
 		assert.doesNotMatch(description, /MUST call subagent_wait/i);
 		assert.match(description, /ordinary child subagents are not orchestrators/i);
 		assert.match(description, /keep one writer/i);
-		assert.match(description, /Exact-output tasks.*acceptance:false/i);
+		assert.match(description, /Exact-output tasks.*acceptance:\{level:"none",reason:"exact-output transform"\}/i);
 		assert.match(description, /dynamic expand.*both on the dynamic step and its parallel template/i);
 		assert.match(description, /Never rely on auto-inference to suppress acceptance/i);
 		assert.match(description, /view: "fleet"/);
@@ -100,7 +100,7 @@ describe("registered subagent tool description", () => {
 		assert.match(description, /Do not sleep or poll/i);
 		assert.match(description, /ordinary child subagents are not orchestrators/i);
 		assert.match(description, /one writer/i);
-		assert.match(description, /exact token\/JSON transforms.*acceptance:false/i);
+		assert.match(description, /exact token\/JSON transforms.*acceptance:\{level:"none",reason:"exact-output transform"\}/i);
 		assert.match(description, /dynamic expand.*both on the step and its parallel template/i);
 		assert.match(description, /do not rely on inference/i);
 		assert.match(description, /view:"fleet"/);
