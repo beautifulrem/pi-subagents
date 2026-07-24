@@ -907,6 +907,7 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 					{ agent: "writer", task: "Use {outputs.reviews}" },
 				],
 				agents,
+				{ acceptance: false },
 			),
 		);
 
@@ -914,6 +915,7 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.equal(mockPi.callCount(), 2);
 		assert.deepEqual(result.details.outputs?.reviews?.structured, []);
 		assert.equal(result.details.workflowGraph?.nodes[1]?.status, "completed");
+		assert.equal(result.details.workflowGraph?.nodes[1]?.acceptanceStatus, "not-required");
 		assert.deepEqual(result.details.workflowGraph?.nodes[1]?.children, []);
 	});
 
