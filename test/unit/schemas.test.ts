@@ -536,6 +536,7 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 			{ chain: [{ parallel: [{ agent: "reviewer", output: 123 }] }] },
 			{ chain: [{ parallel: [{ agent: "reviewer", reads: "input.md" }] }] },
 			{ chain: [{ parallel: [{ agent: "reviewer", skill: 123 }] }] },
+			{ chain: [{ parallel: [] }] },
 			{ chain: [{ agent: "reviewer", outputSchema: "schema.json" }] },
 			{ chain: [{ parallel: [{ agent: "reviewer", outputSchema: "schema.json" }] }] },
 			{ chain: [{ expand: { from: { output: "targets", path: "/items" }, maxItems: 4, expression: "items" }, parallel: { agent: "reviewer" }, collect: { as: "reviews" } }] },

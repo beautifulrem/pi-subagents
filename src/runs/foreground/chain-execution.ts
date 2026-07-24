@@ -80,6 +80,7 @@ import { isAgentContractV1 } from "../shared/agent-contract.ts";
 import type { ChainOutputMap } from "../../shared/types.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
 import type { ContextMode } from "../shared/context-mode.ts";
+import { writePrivateAtomicJson } from "../../shared/atomic-json.ts";
 
 interface ChainExecutionDetailsInput {
 	results: SingleResult[];
@@ -452,7 +453,7 @@ interface ChainExecutionResult {
 	};
 }
 
-function terminalChainOutput(steps: ChainStep[], results: SingleResult[], outputs: ChainOutputMap): string {
+function terminalChainOutput(steps: ChainStep[], results: SingleResult[], outputs: ChainOutputMap, chainDir: string): string {
 	const finalStep = steps.at(-1);
 	if (!finalStep) return "";
 
@@ -466,17 +467,27 @@ function terminalChainOutput(steps: ChainStep[], results: SingleResult[], output
 			(index, agent) => `=== Final item ${items[index]?.key ?? index}: ${agent} ===`,
 		);
 	} else if (isParallelStep(finalStep)) {
+		if (finalStep.parallel.length === 0) return "[]";
 		const finalResults = results.slice(-finalStep.parallel.length);
 		output = aggregateParallelOutputs(
-			finalResults.map((result) => ({ agent: result.agent, output: outputEntryFromResult(result, steps.length - 1).text, exitCode: result.exitCode, error: result.error, timedOut: result.timedOut })),
+			finalResults.map((result) => ({ agent: result.agent, output: outputEntryFromResult(result, steps.length - 1).text, exitCode: result.exitCode, error: result.error ?? result.outputSaveError, timedOut: result.timedOut })),
 			(index, agent) => `=== Final task ${index + 1}: ${agent} ===`,
 		);
 	} else {
 		const finalResult = results.at(-1);
-		output = finalResult ? outputEntryFromResult(finalResult, steps.length - 1).text : "";
+		output = finalResult
+			? aggregateParallelOutputs(
+				[{ agent: finalResult.agent, output: outputEntryFromResult(finalResult, steps.length - 1).text, exitCode: finalResult.exitCode, error: finalResult.error ?? finalResult.outputSaveError, timedOut: finalResult.timedOut }],
+				(_index, agent) => `=== Final step: ${agent} ===`,
+			)
+			: "";
 	}
 
-	return truncateOutput(output, DEFAULT_MAX_OUTPUT).text;
+	const truncated = truncateOutput(output, DEFAULT_MAX_OUTPUT);
+	if (!truncated.truncated) return truncated.text;
+	const artifactPath = path.join(chainDir, "terminal-output.json");
+	writePrivateAtomicJson(artifactPath, { version: 1, output });
+	return truncateOutput(output, DEFAULT_MAX_OUTPUT, artifactPath).text;
 }
 
 /**
@@ -1367,7 +1378,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 		}
 	}
 
-	const summary = buildChainSummary(chainSteps, results, chainDir, "completed", undefined, terminalChainOutput(chainSteps, results, outputs));
+	const summary = buildChainSummary(chainSteps, results, chainDir, "completed", undefined, terminalChainOutput(chainSteps, results, outputs, chainDir));
 
 	return {
 		content: [{ type: "text", text: summary }],

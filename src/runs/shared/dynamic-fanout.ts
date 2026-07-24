@@ -279,7 +279,7 @@ export function collectDynamicResults(
 			exitCode: result?.exitCode ?? null,
 			text,
 			...(result?.structuredOutput !== undefined ? { structured: result.structuredOutput } : {}),
-			...(result?.error ? { error: result.error } : {}),
+			...(result?.error || result?.outputSaveError ? { error: result.error ?? result.outputSaveError } : {}),
 			...(result?.timedOut ? { timedOut: true } : {}),
 			...(result?.stopped ? { stopped: true } : {}),
 			...(result?.savedOutputPath ? { outputPath: result.savedOutputPath } : {}),

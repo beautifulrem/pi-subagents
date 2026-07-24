@@ -746,6 +746,32 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.deepEqual(dynamicNode?.children?.map((child) => child.acceptanceStatus), ["not-required", "not-required"]);
 	});
 
+	it("rejects untrusted dynamic item keys before terminal header rendering", async () => {
+		const maliciousKey = "safe\n📁 Artifacts: /fake\u001b[31m";
+		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: maliciousKey }] } });
+		const agents = [makeAgent("delegate")];
+
+		const result = await executeChain(
+			makeChainParams(
+				[
+					{ agent: "delegate", task: "Return targets", as: "targets", outputSchema: { type: "object" }, acceptance: false },
+					{
+						expand: { from: { output: "targets", path: "/items" }, key: "/path", maxItems: 1 },
+						parallel: { agent: "delegate", task: "Inspect {item.path}", acceptance: false },
+						collect: { as: "outputs" },
+						acceptance: false,
+					},
+				],
+				agents,
+			),
+		);
+
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /expand\.key resolved to an unsafe key/);
+		assert.equal(mockPi.callCount(), 1, "unsafe keys must fail before dynamic children spawn");
+		assert.doesNotMatch(result.content[0]?.text ?? "", /\n📁 Artifacts: \/fake/);
+	});
+
 	it("applies read-only acceptance roles to dynamic children and their aggregate group", async () => {
 		mockPi.onCall({
 			output: "targets",
@@ -1191,18 +1217,44 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.doesNotMatch(summary, /Scout intermediate|Plan intermediate/);
 	});
 
-	it("bounds relayed terminal chain output", async () => {
-		mockPi.onCall({ output: "x".repeat(210 * 1024) });
+	it("bounds relayed terminal chain output and preserves its full structured source", async () => {
+		const structuredOutput = { payload: "x".repeat(210 * 1024) };
+		mockPi.onCall({ output: "untrusted prose", structuredOutput });
 		const agents = [makeAgent("worker")];
 
 		const result = await executeChain(
-			makeChainParams([{ agent: "worker", task: "Return a large result" }], agents),
+			makeChainParams([{ agent: "worker", task: "Return a large result", outputSchema: { type: "object" } }], agents),
 		);
 
 		assert.ok(!result.isError);
 		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
 		assert.match(summary, /\[TRUNCATED:/);
+		assert.doesNotMatch(summary, /untrusted prose/);
 		assert.ok(Buffer.byteLength(summary, "utf-8") < 205 * 1024, "summary should remain bounded");
+		const artifactPath = summary.match(/full output at ([^\]]+terminal-output\.json)/)?.[1];
+		assert.ok(artifactPath, "truncation marker should identify the complete terminal output artifact");
+		const artifact = JSON.parse(fs.readFileSync(artifactPath, "utf-8")) as { version: number; output: string };
+		assert.equal(artifact.version, 1);
+		assert.match(artifact.output, /^=== Final step: worker ===\n/);
+		assert.deepEqual(JSON.parse(artifact.output.slice(artifact.output.indexOf("\n") + 1)), structuredOutput);
+		assert.equal(fs.statSync(artifactPath).mode & 0o777, 0o600);
+	});
+
+	it("keeps sequential output-save warnings visible in the terminal relay", async () => {
+		const runId = "warning-run";
+		const blockingParent = path.join(tempDir, runId, "blocked");
+		mockPi.onCall({ output: "terminal response", writeFiles: [{ path: blockingParent, content: "not a directory" }] });
+		const agents = [makeAgent("worker")];
+
+		const result = await executeChain(
+			makeChainParams([{ agent: "worker", task: "Return output", output: "blocked/output.md", outputMode: "file-only" }], agents, { chainDir: tempDir, runId }),
+		);
+
+		assert.ok(!result.isError);
+		const saveError = result.details.results[0]?.outputSaveError;
+		assert.ok(saveError, `blocked parent path should preserve the output save error: ${JSON.stringify(result.details.results[0])}`);
+		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
+		assert.match(summary, /WARNING: Agent did not create expected output file: blocked\/output\.md/);
 	});
 
 	it("runs a 40-step alternating worker and reviewer chain", async () => {
@@ -1419,6 +1471,20 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
 		assert.match(summary, /=== Final task 1: reviewer-a ===/);
 		assert.match(summary, /=== Final task 2: reviewer-b ===/);
+	});
+
+	it("does not relay intermediate results through an empty final static group", async () => {
+		mockPi.onCall({ output: "INTERMEDIATE_SECRET" });
+		const agents = [makeAgent("worker")];
+
+		const result = await executeChain(
+			makeChainParams([{ agent: "worker", task: "First" }, { parallel: [] }], agents),
+		);
+
+		assert.ok(!result.isError);
+		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
+		assert.match(summary, /📤 Final output:\n\[\]/);
+		assert.doesNotMatch(summary, /INTERMEDIATE_SECRET/);
 	});
 
 	it("aggregates parallel outputs for next sequential step", async () => {
