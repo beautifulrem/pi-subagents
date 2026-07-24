@@ -881,6 +881,8 @@ export interface AsyncStartedEvent {
 	deadlineAt?: number;
 	turnBudget?: TurnBudgetState;
 	nestedRoute?: NestedRouteInfo;
+	/** Ephemeral parent/runner capability for authenticating persisted control notices. */
+	controlEventCapability?: string;
 }
 
 export interface AsyncStatus {
@@ -1032,6 +1034,8 @@ export interface AsyncJobState {
 	controlEventCursor?: number;
 	controlEventFileId?: string;
 	controlEventSkippingOversizedLine?: boolean;
+	/** Live-only capability; intentionally absent from persisted status and restored jobs. */
+	controlEventCapability?: string;
 	nestedRoute?: NestedRouteInfo;
 	nestedChildren?: NestedRunSummary[];
 }
@@ -1405,6 +1409,7 @@ export const RESULTS_DIR = path.join(TEMP_ROOT_DIR, "async-subagent-results");
 export const ASYNC_DIR = path.join(TEMP_ROOT_DIR, "async-subagent-runs");
 export const CHAIN_RUNS_DIR = path.join(TEMP_ROOT_DIR, "chain-runs");
 export const TEMP_ARTIFACTS_DIR = path.join(TEMP_ROOT_DIR, "artifacts");
+export const SUBAGENT_CONTROL_EVENT_CAPABILITY_ENV = "PI_SUBAGENT_CONTROL_EVENT_CAPABILITY";
 export const WIDGET_KEY = "subagent-async";
 export const SLASH_RESULT_TYPE = "subagent-slash-result";
 export const SLASH_TEXT_RESULT_TYPE = "subagent-slash-text-result";

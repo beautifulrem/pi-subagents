@@ -33,6 +33,7 @@ import {
 	type SteeringTargetStatus,
 	DEFAULT_MAX_OUTPUT,
 	type MaxOutputConfig,
+	SUBAGENT_CONTROL_EVENT_CAPABILITY_ENV,
 	SUBAGENT_LIFECYCLE_ARTIFACT_VERSION,
 	truncateOutput,
 	getSubagentDepthEnv,
@@ -420,6 +421,7 @@ function runPiStreaming(
 		onWriterProcess?.({ state: "spawning" });
 		const outputStream = createPrivateArtifactWriteStream(outputFile, false);
 		const spawnEnv = { ...process.env, ...(env ?? {}), ...getSubagentDepthEnv(maxSubagentDepth) };
+		delete spawnEnv[SUBAGENT_CONTROL_EVENT_CAPABILITY_ENV];
 		const spawnSpec = getPiSpawnCommand(args, {
 			...(piPackageRoot ? { piPackageRoot } : {}),
 			...(piArgv1 ? { argv1: piArgv1 } : {}),
@@ -2037,6 +2039,7 @@ async function runSubagent(
 		if (channels.length === 0 || !claimControlNotification(controlConfig, event, emittedControlEventKeys, childIntercomTarget)) return;
 		appendJsonl(eventsPath, JSON.stringify({
 			type: "subagent.control",
+			controlEventCapability: process.env[SUBAGENT_CONTROL_EVENT_CAPABILITY_ENV],
 			event,
 			channels,
 			childIntercomTarget,
@@ -2112,7 +2115,7 @@ async function runSubagent(
 		appendJsonl(eventsPath, JSON.stringify({ type, ts: Date.now(), runId: id, requestId: request.id, ...(index !== undefined ? { index } : {}), ...extra }));
 	};
 	const emitSteeringNotice = (requestId: string, state: "failed" | "partial" | "recovered", message: string): void => {
-		appendJsonl(eventsPath, JSON.stringify({ type: "subagent.steering.notice", ts: Date.now(), runId: id, requestId, state, message, ...(config.sessionId ? { currentSessionId: config.sessionId } : {}) }));
+		appendJsonl(eventsPath, JSON.stringify({ type: "subagent.steering.notice", controlEventCapability: process.env[SUBAGENT_CONTROL_EVENT_CAPABILITY_ENV], ts: Date.now(), runId: id, requestId, state, message, ...(config.sessionId ? { currentSessionId: config.sessionId } : {}) }));
 	};
 	const recordSteeringLifecycle = (request: SteerRequest, targets: Array<{ index: number; state: SteeringTargetState; reason?: string }>): void => {
 		const lifecycle = steeringStatus(statusPayload);

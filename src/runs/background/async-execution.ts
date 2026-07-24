@@ -3,6 +3,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -45,6 +46,7 @@ import {
 	ASYNC_DIR,
 	RESULTS_DIR,
 	SUBAGENT_ASYNC_STARTED_EVENT,
+	SUBAGENT_CONTROL_EVENT_CAPABILITY_ENV,
 	SUBAGENT_LIFECYCLE_ARTIFACT_VERSION,
 	TEMP_ROOT_DIR,
 	getAsyncConfigPath,
@@ -398,7 +400,7 @@ function terminateRunnerBeforeProceed(pid: number): void {
 	}
 }
 
-function spawnRunner(cfg: object, suffix: string, cwd: string): { pid?: number; error?: string } {
+function spawnRunner(cfg: object, suffix: string, cwd: string): { pid?: number; controlEventCapability?: string; error?: string } {
 	if (!jitiCliPath) {
 		return { error: "upstream jiti for TypeScript execution could not be found; ensure package dependencies are installed" };
 	}
@@ -428,6 +430,7 @@ function spawnRunner(cfg: object, suffix: string, cwd: string): { pid?: number; 
 	if (startupProceedPath) fs.rmSync(startupProceedPath, { force: true });
 
 	const logPaths = resolveAsyncRunnerLogPaths(cfg);
+	const controlEventCapability = randomBytes(32).toString("base64url");
 	let stdoutFd: number | undefined;
 	let stderrFd: number | undefined;
 	try {
@@ -444,6 +447,7 @@ function spawnRunner(cfg: object, suffix: string, cwd: string): { pid?: number; 
 			env: {
 				...process.env,
 				...(piPackageRoot ? { [PI_CODING_AGENT_PACKAGE_ROOT_ENV]: piPackageRoot } : {}),
+				[SUBAGENT_CONTROL_EVENT_CAPABILITY_ENV]: controlEventCapability,
 			},
 		});
 		closeFd(stdoutFd);
@@ -484,7 +488,7 @@ function spawnRunner(cfg: object, suffix: string, cwd: string): { pid?: number; 
 				// Proceed is the commit point; handshake cleanup cannot turn a running revival into a start error.
 			}
 		}
-		return { pid: proc.pid };
+		return { pid: proc.pid, controlEventCapability };
 	} catch (error) {
 		closeFd(stdoutFd);
 		closeFd(stderrFd);
@@ -1025,6 +1029,7 @@ export function executeAsyncChain(
 			lifecycleArtifactVersion: SUBAGENT_LIFECYCLE_ARTIFACT_VERSION,
 			id,
 			pid: spawnResult.pid,
+			controlEventCapability: spawnResult.controlEventCapability,
 			sessionId: ctx.currentSessionId,
 			mode: resultMode,
 			agent: firstAgents[0],
@@ -1325,6 +1330,7 @@ export function executeAsyncSingle(
 			lifecycleArtifactVersion: SUBAGENT_LIFECYCLE_ARTIFACT_VERSION,
 			id,
 			pid: spawnResult.pid,
+			controlEventCapability: spawnResult.controlEventCapability,
 			sessionId: ctx.currentSessionId,
 			mode: "single",
 			agent,

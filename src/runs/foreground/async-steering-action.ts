@@ -127,7 +127,7 @@ export async function steerAsyncRun(input: {
 	if (recoveryAllowed && finalResult?.state !== "scheduled" && input.recover) {
 		const appendSteeringNotice = (state: "failed" | "recovered", message: string): void => {
 			try {
-				appendJsonl(path.join(asyncDir, "events.jsonl"), JSON.stringify({ type: "subagent.steering.notice", ts: Date.now(), runId: status.runId, requestId, state, message, ...(status.sessionId ? { currentSessionId: status.sessionId } : {}) }));
+				appendJsonl(path.join(asyncDir, "events.jsonl"), JSON.stringify({ type: "subagent.steering.notice", controlEventCapability: tracked?.controlEventCapability, ts: Date.now(), runId: status.runId, requestId, state, message, ...(status.sessionId ? { currentSessionId: status.sessionId } : {}) }));
 			} catch {
 				// The action result and status remain authoritative if diagnostic notification persistence fails.
 			}

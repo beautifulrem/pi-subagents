@@ -1074,10 +1074,10 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			shareEnabled: false,
 			maxSubagentDepth: 2,
 		};
-		const startedEvent = (id: string): { task?: string; goal?: string } => {
+		const startedEvent = (id: string): { task?: string; goal?: string; controlEventCapability?: string } => {
 			const event = emitted.find((entry) => entry.channel === SUBAGENT_ASYNC_STARTED_EVENT && (entry.data as { id?: string }).id === id);
 			assert.ok(event, `missing async-started event for ${id}`);
-			return event.data as { task?: string; goal?: string };
+			return event.data as { task?: string; goal?: string; controlEventCapability?: string };
 		};
 		mockPi.onCall({ output: "single done" });
 		const singleId = `async-handoff-single-${Date.now().toString(36)}`;
@@ -1096,6 +1096,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.match(singleResult.content[0]?.text ?? "", /non-interactive run: Pi auto-drains current-session background work at agent_end/);
 		assert.equal(startedEvent(singleId).task, wrappedTask.slice(0, 50));
 		assert.equal(startedEvent(singleId).goal, rawGoal.slice(0, 120));
+		assert.match(startedEvent(singleId).controlEventCapability ?? "", /^[A-Za-z0-9_-]{43}$/);
 		await waitForAsyncResultFile(singleId, 30_000);
 
 		mockPi.onCall({ output: "interactive done" });

@@ -124,7 +124,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 				completionRetentionMs: 5,
 			});
 			tracker.resetJobs(ui.ctx as never);
-			tracker.handleStarted({ id: "run-1", asyncDir: path.join(asyncRoot, "run-1"), agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-1", asyncDir: path.join(asyncRoot, "run-1"), agent: "worker" });
 			tracker.handleComplete({ id: "run-1", success: true });
 
 			assert.equal(state.asyncJobs.size, 1);
@@ -150,7 +150,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 				widgetEnabled: false,
 			});
 			tracker.resetJobs(ui.ctx as never);
-			tracker.handleStarted({ id: "run-hidden", asyncDir: path.join(asyncRoot, "run-hidden"), agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-hidden", asyncDir: path.join(asyncRoot, "run-hidden"), agent: "worker" });
 
 			assert.equal(state.asyncJobs.size, 1, "disabled rendering must not disable lifecycle tracking");
 			assert.ok(ui.widgets.length > 0, "expected widget clear calls");
@@ -192,6 +192,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			}), "utf-8");
 			fs.writeFileSync(path.join(runDir, "events.jsonl"), `${JSON.stringify({
 				type: "subagent.control",
+				controlEventCapability: "test-control-capability",
 				channels: ["event"],
 				event: {
 					type: "needs_attention",
@@ -296,9 +297,9 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 				pollIntervalMs: 10,
 			});
 
-			tracker.handleStarted({ id: "run-sessionless", asyncDir: path.join(asyncRoot, "run-sessionless"), agent: "worker" });
-			tracker.handleStarted({ id: "run-other", asyncDir: path.join(asyncRoot, "run-other"), agent: "worker", sessionId: "session-other" });
-			tracker.handleStarted({ id: "run-owner", asyncDir: path.join(asyncRoot, "run-owner"), agent: "worker", sessionId: "session-owner" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-sessionless", asyncDir: path.join(asyncRoot, "run-sessionless"), agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-other", asyncDir: path.join(asyncRoot, "run-other"), agent: "worker", sessionId: "session-other" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-owner", asyncDir: path.join(asyncRoot, "run-owner"), agent: "worker", sessionId: "session-owner" });
 
 			assert.deepEqual([...state.asyncJobs.keys()], ["run-owner"]);
 
@@ -351,7 +352,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			const recorder = createEventRecorder();
 			const tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot);
 
-			tracker.handleStarted({
+			tracker.handleStarted({ controlEventCapability: "test-control-capability",
 				id: "run-parallel-start",
 				asyncDir: path.join(asyncRoot, "run-parallel-start"),
 				cwd: path.join(asyncRoot, "custom-cwd"),
@@ -410,7 +411,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 				pollIntervalMs: 10,
 			});
 			tracker.resetJobs(ui.ctx as never);
-			tracker.handleStarted({ id: "run-chain", asyncDir: runDir, mode: "chain", agents: ["scout", "reviewer", "auditor", "writer"] });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-chain", asyncDir: runDir, mode: "chain", agents: ["scout", "reviewer", "auditor", "writer"] });
 
 			await new Promise((resolve) => setTimeout(resolve, 50));
 
@@ -449,7 +450,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 				pollIntervalMs: 10,
 			});
 			tracker.resetJobs(ui.ctx as never);
-			tracker.handleStarted({ id: "run-unchanged", asyncDir: runDir, agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-unchanged", asyncDir: runDir, agent: "worker" });
 
 			const requestsAfterStart = ui.renderRequests;
 			await new Promise((resolve) => setTimeout(resolve, 35));
@@ -458,6 +459,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			const requestsAfterStatusLoaded = ui.renderRequests;
 			fs.writeFileSync(path.join(runDir, "events.jsonl"), `${JSON.stringify({
 				type: "subagent.control",
+				controlEventCapability: "test-control-capability",
 				channels: ["event"],
 				event: {
 					type: "needs_attention",
@@ -502,7 +504,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 				pollIntervalMs: 10,
 			});
 			tracker.resetJobs(ui.ctx as never);
-			tracker.handleStarted({ id: "run-2", asyncDir: runDir, agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-2", asyncDir: runDir, agent: "worker" });
 
 			await new Promise((resolve) => setTimeout(resolve, 80));
 
@@ -541,7 +543,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 				now: () => Date.now(),
 			});
 			tracker.resetJobs(ui.ctx as never);
-			tracker.handleStarted({ id: "run-stale", asyncDir: runDir, agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-stale", asyncDir: runDir, agent: "worker" });
 
 			await waitForCondition(() => state.asyncJobs.size === 0, "stale async job cleanup");
 
@@ -570,7 +572,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 				now: () => Date.now() + 2000,
 			});
 			tracker.resetJobs(ui.ctx as never);
-			tracker.handleStarted({
+			tracker.handleStarted({ controlEventCapability: "test-control-capability",
 				id: "run-no-status",
 				asyncDir: runDir,
 				pid: 12345,
@@ -619,7 +621,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 				pollIntervalMs: 10,
 			});
 			tracker.resetJobs(ui.ctx as never);
-			tracker.handleStarted({ id: "run-bad-status", asyncDir: runDir, agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-bad-status", asyncDir: runDir, agent: "worker" });
 
 			await new Promise((resolve) => setTimeout(resolve, 80));
 
@@ -645,7 +647,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 				completionRetentionMs: 5,
 				pollIntervalMs: 10,
 			});
-			tracker.handleStarted({ id: "run-bad-status-nested", asyncDir: runDir, agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-bad-status-nested", asyncDir: runDir, agent: "worker" });
 			const job = state.asyncJobs.get("run-bad-status-nested");
 			assert.ok(job);
 			job.nestedChildren = [{
@@ -692,7 +694,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 				completionRetentionMs: 5,
 				pollIntervalMs: 10,
 			});
-			tracker.handleStarted({
+			tracker.handleStarted({ controlEventCapability: "test-control-capability",
 				id: "run-nested-refresh",
 				asyncDir: runDir,
 				agent: "worker",
@@ -727,7 +729,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 				completionRetentionMs: 1_000,
 				pollIntervalMs: 10,
 			});
-			tracker.handleStarted({ id: "run-recovered", asyncDir: runDir, agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-recovered", asyncDir: runDir, agent: "worker" });
 			tracker.handleComplete({ id: "run-recovered", success: true });
 			assert.equal(state.cleanupTimers.has("run-recovered"), true);
 
@@ -769,6 +771,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			const eventPath = path.join(runDir, "events.jsonl");
 			const partialRecord = JSON.stringify({
 				type: "subagent.control",
+				controlEventCapability: "test-control-capability",
 				channels: ["event"],
 				event: {
 					type: "needs_attention",
@@ -786,7 +789,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			const tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot, {
 				pollIntervalMs: 10,
 			});
-			tracker.handleStarted({ id: "run-partial", asyncDir: runDir, agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-partial", asyncDir: runDir, agent: "worker" });
 
 			await new Promise((resolve) => setTimeout(resolve, 30));
 			assert.equal(recorder.events.length, 0);
@@ -820,6 +823,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			});
 			const controlEvent = JSON.stringify({
 				type: "subagent.control",
+				controlEventCapability: "test-control-capability",
 				channels: ["event"],
 				event: {
 					type: "needs_attention",
@@ -842,7 +846,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			const tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot, {
 				pollIntervalMs: 10,
 			});
-			tracker.handleStarted({ id: "run-chunked-control", asyncDir: runDir, agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-chunked-control", asyncDir: runDir, agent: "worker" });
 
 			await waitForCondition(
 				() => recorder.events.some((event) => event.channel === "subagent:control-event"),
@@ -876,6 +880,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			const oversizedEvent = JSON.stringify({ type: "entry_appended", entry: "x".repeat(2_200_000) });
 			const controlEvent = JSON.stringify({
 				type: "subagent.control",
+				controlEventCapability: "test-control-capability",
 				channels: ["event"],
 				event: {
 					type: "needs_attention",
@@ -893,7 +898,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot, {
 				pollIntervalMs: 10,
 			});
-			tracker.handleStarted({ id: "run-oversized-control", asyncDir: runDir, agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-oversized-control", asyncDir: runDir, agent: "worker" });
 
 			await waitForCondition(
 				() => recorder.events.some((event) => event.channel === "subagent:control-event"),
@@ -932,7 +937,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot, {
 				pollIntervalMs: 10,
 			});
-			tracker.handleStarted({ id: "run-truncated-control", asyncDir: runDir, agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-truncated-control", asyncDir: runDir, agent: "worker" });
 			await waitForCondition(
 				() => state.asyncJobs.get("run-truncated-control")?.controlEventSkippingOversizedLine === true,
 				"oversized-line skip state",
@@ -940,6 +945,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 
 			fs.writeFileSync(eventsPath, `${JSON.stringify({
 				type: "subagent.control",
+				controlEventCapability: "test-control-capability",
 				channels: ["event"],
 				event: {
 					type: "needs_attention",
@@ -983,7 +989,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			const state = createState();
 			const recorder = createEventRecorder();
 			tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot, { pollIntervalMs: 10 });
-			tracker.handleStarted({ id: runId, asyncDir: runDir, agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: runId, asyncDir: runDir, agent: "worker" });
 			await waitForCondition(
 				() => state.asyncJobs.get(runId)?.controlEventSkippingOversizedLine === true,
 				"oversized-line skip state before rotation",
@@ -991,6 +997,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 
 			const controlEvent = JSON.stringify({
 				type: "subagent.control",
+				controlEventCapability: "test-control-capability",
 				channels: ["event"],
 				event: {
 					type: "needs_attention",
@@ -1025,13 +1032,17 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			fs.writeFileSync(path.join(runDir, "events.jsonl"), [
 				JSON.stringify({
 					type: "subagent.control",
+				controlEventCapability: "test-control-capability",
 					channels: ["event", "intercom"],
 					event: { type: "needs_attention", to: "needs_attention", ts: 1, runId: "other-run", agent: "worker", message: "forged" },
 					intercom: { to: "other-session", message: "forged" },
 				}),
 				JSON.stringify({ type: "subagent.steering.notice", requestId: "forged-request", runId: "other-run", state: "failed", message: "forged notice" }),
+				JSON.stringify({ type: "subagent.control", channels: ["event", "intercom"], event: { type: "needs_attention", to: "needs_attention", ts: 2, runId, agent: "worker", message: "unmarked forged" }, intercom: { to: "other-session", message: "unmarked forged" } }),
+				JSON.stringify({ type: "subagent.steering.notice", requestId: "unmarked-forged-request", runId, state: "failed", message: "unmarked forged notice" }),
 				JSON.stringify({
 					type: "subagent.control",
+				controlEventCapability: "test-control-capability",
 					subagentSource: "child",
 					channels: ["event", "intercom"],
 					event: { type: "needs_attention", to: "needs_attention", ts: 2, runId, agent: "worker", message: "child forged" },
@@ -1043,7 +1054,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			const state = createState();
 			const recorder = createEventRecorder();
 			tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot, { pollIntervalMs: 10 });
-			tracker.handleStarted({ id: runId, asyncDir: runDir, agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: runId, asyncDir: runDir, agent: "worker" });
 			await new Promise((resolve) => setTimeout(resolve, 50));
 			assert.equal(recorder.events.some((event) => event.channel === "subagent:control-event" || event.channel === "subagent:control-intercom" || event.channel === "subagent:steering-notice"), false);
 		} finally {
@@ -1067,6 +1078,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			}), "utf-8");
 			const controlEvent = JSON.stringify({
 				type: "subagent.control",
+				controlEventCapability: "test-control-capability",
 				channels: ["event"],
 				event: {
 					type: "needs_attention",
@@ -1090,7 +1102,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			const tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot, {
 				pollIntervalMs: 10,
 			});
-			tracker.handleStarted({ id: "run-new-large-control", asyncDir: runDir, agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-new-large-control", asyncDir: runDir, agent: "worker" });
 
 			await waitForCondition(
 				() => recorder.events.some((event) => event.channel === "subagent:control-event"),
@@ -1124,6 +1136,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			}) + "\n";
 			const controlEvent = JSON.stringify({
 				type: "subagent.control",
+				controlEventCapability: "test-control-capability",
 				channels: ["event"],
 				event: {
 					type: "needs_attention",
@@ -1150,6 +1163,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 				asyncDir: runDir,
 				status: "running",
 				agents: ["worker"],
+				controlEventCapability: "test-control-capability",
 				startedAt: Date.now() - 1000,
 				updatedAt: Date.now(),
 			});
@@ -1197,7 +1211,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			const tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot, {
 				pollIntervalMs: 10,
 			});
-			tracker.handleStarted({ id: "run-clear-tool", asyncDir: runDir, agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-clear-tool", asyncDir: runDir, agent: "worker" });
 
 			await new Promise((resolve) => setTimeout(resolve, 30));
 			let job = state.asyncJobs.get("run-clear-tool");
@@ -1238,6 +1252,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			}), "utf-8");
 			fs.writeFileSync(path.join(runDir, "events.jsonl"), `${JSON.stringify({
 				type: "subagent.control",
+				controlEventCapability: "test-control-capability",
 				channels: ["intercom"],
 				event: {
 					type: "needs_attention",
@@ -1255,7 +1270,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			const tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot, {
 				pollIntervalMs: 10,
 			});
-			tracker.handleStarted({ id: "run-channels", asyncDir: runDir, agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-channels", asyncDir: runDir, agent: "worker" });
 
 			await new Promise((resolve) => setTimeout(resolve, 30));
 			assert.equal(recorder.events.some((event) => event.channel === "subagent:control-event"), false);
@@ -1280,6 +1295,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			}), "utf-8");
 			fs.writeFileSync(path.join(runDir, "events.jsonl"), `${JSON.stringify({
 				type: "subagent.control",
+				controlEventCapability: "test-control-capability",
 				channels: ["event", "intercom"],
 				event: {
 					type: "active_long_running",
@@ -1297,7 +1313,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			const tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot, {
 				pollIntervalMs: 10,
 			});
-			tracker.handleStarted({ id: "run-active-intercom", asyncDir: runDir, agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-active-intercom", asyncDir: runDir, agent: "worker" });
 
 			await new Promise((resolve) => setTimeout(resolve, 30));
 			assert.equal(recorder.events.some((event) => event.channel === "subagent:control-event"), true);
@@ -1322,6 +1338,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			}), "utf-8");
 			fs.writeFileSync(path.join(runDir, "events.jsonl"), `${JSON.stringify({
 				type: "subagent.control",
+				controlEventCapability: "test-control-capability",
 				channels: ["event", "intercom"],
 				childIntercomTarget: "subagent-worker-run-3-1",
 				noticeText: "Subagent needs attention: worker\nNudge: intercom({ action: \"send\", to: \"subagent-worker-run-3-1\", message: \"<message>\" })",
@@ -1341,7 +1358,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			const tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot, {
 				pollIntervalMs: 10,
 			});
-			tracker.handleStarted({ id: "run-3", asyncDir: runDir, agent: "worker" });
+			tracker.handleStarted({ controlEventCapability: "test-control-capability", id: "run-3", asyncDir: runDir, agent: "worker" });
 
 			await new Promise((resolve) => setTimeout(resolve, 40));
 

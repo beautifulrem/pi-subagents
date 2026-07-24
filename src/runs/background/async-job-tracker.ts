@@ -170,6 +170,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 					return;
 				}
 				if (!parsed || typeof parsed !== "object") return;
+				if (typeof job.controlEventCapability !== "string" || (parsed as { controlEventCapability?: unknown }).controlEventCapability !== job.controlEventCapability) return;
 				if ((parsed as { subagentSource?: unknown }).subagentSource === "child") return;
 				if ((parsed as { type?: unknown }).type === "subagent.steering.notice") {
 					const notice = parsed as Partial<SteeringNotice>;
@@ -428,6 +429,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			deadlineAt: info.deadlineAt,
 			turnBudget: info.turnBudget,
 			controlEventCursor: 0,
+			controlEventCapability: info.controlEventCapability,
 		});
 		rememberFleetJob(state, state.asyncJobs.get(info.id)!);
 		ensurePoller();
