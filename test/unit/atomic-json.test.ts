@@ -9,6 +9,7 @@ class FakeFs {
 	renameCalls = 0;
 	failMkdirCodes: string[] = [];
 	failRenameCodes: string[] = [];
+	failWriteCode: string | undefined;
 	writeOptions = new Map<string, unknown>();
 
 	mkdirSync(dirPath: string): void {
@@ -22,6 +23,11 @@ class FakeFs {
 	}
 
 	writeFileSync(filePath: string, contents: string, options?: unknown): void {
+		if (this.failWriteCode) {
+			const error = new Error(`write failed with ${this.failWriteCode}`) as NodeJS.ErrnoException;
+			error.code = this.failWriteCode;
+			throw error;
+		}
 		this.files.set(filePath, contents);
 		this.writeOptions.set(filePath, options);
 	}
@@ -134,6 +140,18 @@ describe("writeAtomicJson", () => {
 		assert.equal(fakeFs.renameCalls, 1);
 		assert.deepEqual(waits, []);
 		assert.equal(fakeFs.files.size, 0);
+	});
+
+	it("preserves the previous target when an ENOSPC temp write fails", () => {
+		const fakeFs = new FakeFs();
+		const targetPath = path.join("/tmp", "status.json");
+		fakeFs.files.set(targetPath, "previous");
+		fakeFs.failWriteCode = "ENOSPC";
+		const writeAtomicJson = createWriter(fakeFs, []);
+
+		assert.throws(() => writeAtomicJson(targetPath, { state: "running" }), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOSPC");
+		assert.equal(fakeFs.files.get(targetPath), "previous");
+		assert.equal(fakeFs.files.size, 1);
 	});
 
 	it("cleans up the temp file after retryable failures are exhausted", () => {
