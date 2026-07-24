@@ -36,6 +36,7 @@ CHAIN EXAMPLES (quick reference for the nested schema):
 • Sequential: { chain: [{agent:"agent-a", task:"Analyze {task}"}, {agent:"agent-b", task:"Plan based on {previous}"}] }
 • Parallel fan-out: { chain: [{parallel: [{agent:"agent-a", task:"Check part of {task}", count: 3}]}] }
 • Mixed: { chain: [{agent:"agent-a", task:"Research {task}"}, {parallel: [{agent:"agent-b", task:"Review {previous}", count: 2}]}, {agent:"agent-c", task:"Summarize {previous}"}] }
+• Dynamic expand step: { parallel:{agent:"agent-b",task:"Handle {item}"}, expand:{from:{output:"seed",path:"/items"},item:"item"}, collect:{as:"results"} }. Here parallel must be one template object, not an array, and the step must not also set agent.
 
 MANAGEMENT (use action field, omit agent/task/chain/tasks):
 • { action: "list" } - discover executable agents/chains
@@ -83,6 +84,7 @@ EXECUTE:
 • context can be "fresh" or "fork"; omitted uses each agent defaultContext, otherwise fresh. timeoutMs/maxRuntimeMs apply to foreground and async/background runs.
 • Chain templates may use {task}, {previous}, {chain_dir}, and named outputs. Parallel worktree isolation requires a clean git repo.
 • Chain example: { chain: [{agent:"agent-a", task:"Analyze {task}"}, {parallel: [{agent:"agent-b", task:"Check {previous}", count: 3}]}] }
+• Dynamic expand step: {parallel:{agent:"agent-b",task:"Handle {item}"},expand:{from:{output:"seed",path:"/items"},item:"item"},collect:{as:"results"}}. parallel is one template object, not an array; do not also set agent on that step.
 • If list shows proactive skill subagent suggestions, use a small fresh-context fanout only when the task is broad enough.
 
 MANAGE / CONTROL:
