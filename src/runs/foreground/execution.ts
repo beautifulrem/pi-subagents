@@ -1209,7 +1209,7 @@ export async function runSync(
 		explicit: options.acceptance,
 		agentName,
 		acceptanceRole: agent.acceptanceRole,
-		task: options.acceptanceContext?.task ?? task,
+		task,
 		mode: options.acceptanceContext?.mode ?? "single",
 		async: options.acceptanceContext?.async,
 		dynamic: options.acceptanceContext?.dynamic,

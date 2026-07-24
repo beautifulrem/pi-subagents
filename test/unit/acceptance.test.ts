@@ -54,31 +54,6 @@ describe("acceptance gates", () => {
 		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Fix each item", mode: "chain", dynamic: true }).level, "reviewed");
 	});
 
-	it("does not inject acceptance reports into exact output-only fanout tasks", () => {
-		for (const task of [
-			"For item beta, reply exactly DYNAMIC_beta",
-			"Return structured JSON with items exactly [alpha,beta]",
-		]) {
-			const resolved = resolveEffectiveAcceptance({ agentName: "delegate", task, mode: "chain", dynamic: true });
-			assert.equal(resolved.level, "none", task);
-			assert.deepEqual(resolved.inferredReason, ["explicit output-only task"]);
-			assert.deepEqual(resolved.criteria, []);
-		}
-		assert.equal(resolveEffectiveAcceptance({
-			agentName: "delegate",
-			task: "Implement the fix, then reply exactly DONE",
-			mode: "chain",
-			dynamic: true,
-		}).level, "reviewed");
-		assert.equal(resolveEffectiveAcceptance({
-			agentName: "delegate",
-			task: "Reply exactly DONE",
-			mode: "chain",
-			dynamic: true,
-			explicit: { level: "checked" },
-		}).level, "checked");
-	});
-
 	it("keeps async oracle review tasks on read-only acceptance despite implementation vocabulary", () => {
 		const resolved = resolveEffectiveAcceptance({
 			agentName: "oracle",

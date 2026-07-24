@@ -93,16 +93,6 @@ function inferLevel(input: {
 		&& !/\b(?:do not|don't|must not)\s+patch\b/.test(task)
 		&& /\bpatch\s+(?:(?:\.{0,2}[\\/])?(?:[\w.-]+[\\/])+[\w.-]+|[\w.-]+\.[a-z0-9]+\b|(?:the\s+)?parser\b)/.test(task);
 	const taskMayWrite = readOnlyTask ? false : taskMayMutate(input.task ?? "") || intent.kind === "implementation" || rolePatchTask;
-	const outputOnlyLines = task.split("\n").map((line) => line.trim()).filter(Boolean);
-	const outputOnlyTask = !taskMayWrite && outputOnlyLines.length > 0 && outputOnlyLines.every((line) => /^(?:for\s+(?:item|target)\s+[^,]+,\s*)?(?:(?:reply|respond)\s+(?:with\s+)?exactly\b|return\s+structured\s+json\b).*$/i.test(line));
-	if (outputOnlyTask) {
-		return {
-			level: "none",
-			reasons: ["explicit output-only task"],
-			criteria: [],
-			evidence: [],
-		};
-	}
 	const readOnlyAgent = input.acceptanceRole === "read-only"
 		|| (input.acceptanceRole === undefined && /\b(?:reviewer|oracle|scout|context-builder|researcher|analyst)\b/.test(agent));
 	const writeTask = taskMayWrite

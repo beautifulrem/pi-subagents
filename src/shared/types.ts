@@ -1254,8 +1254,6 @@ export interface RunSyncOptions {
 	agentContract?: AgentContract;
 	acceptance?: AcceptanceInput;
 	acceptanceContext?: {
-		/** Unwrapped user task used only for acceptance inference. */
-		task?: string;
 		mode?: SubagentRunMode;
 		async?: boolean;
 		dynamic?: boolean;

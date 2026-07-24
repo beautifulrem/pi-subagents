@@ -675,38 +675,6 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.deepEqual(dynamicNode?.children?.map((child) => child.itemKey), ["src/a.ts", "src/b.ts"]);
 	});
 
-	it("keeps exact output-only dynamic children free of acceptance-report instructions", async () => {
-		mockPi.onCall({
-			output: "items",
-			structuredOutput: { items: ["alpha", "beta"] },
-		});
-		mockPi.onCall({ output: "DYNAMIC_alpha" });
-		mockPi.onCall({ output: "DYNAMIC_beta" });
-		const agents = [makeAgent("delegate")];
-
-		const result = await executeChain(
-			makeChainParams(
-				[
-					{ agent: "delegate", task: "Return structured JSON with items exactly [alpha,beta]", as: "items", outputSchema: { type: "object" } },
-					{
-						expand: { from: { output: "items", path: "/items" }, item: "item", maxItems: 2 },
-						parallel: { agent: "delegate", task: "For item {item}, reply exactly DYNAMIC_{item}" },
-						collect: { as: "mapped" },
-						concurrency: 2,
-					},
-				],
-				agents,
-			),
-		);
-
-		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
-		const delegateResults = result.details.results.filter((child) => child.agent === "delegate");
-		assert.deepEqual(delegateResults.map((child) => child.acceptance?.effectiveAcceptance.level), ["none", "none", "none"]);
-		assert.doesNotMatch(readCallArgs(0).at(-1) ?? "", /Acceptance Contract/);
-		assert.doesNotMatch(readCallArgs(1).at(-1) ?? "", /Acceptance Contract/);
-		assert.doesNotMatch(readCallArgs(2).at(-1) ?? "", /Acceptance Contract/);
-	});
-
 	it("persists checked acceptance status for dynamic fanout materialized children and aggregate group", async () => {
 		mockPi.onCall({
 			output: "targets",
