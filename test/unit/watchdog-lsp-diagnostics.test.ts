@@ -124,6 +124,35 @@ describe("watchdog LSP diagnostics", () => {
 		}
 	});
 
+	it("reports a post-initialize language-server transport failure without waiting for timeout", async () => {
+		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-watchdog-lsp-exit-"));
+		try {
+			const binDir = path.join(temp, "node_modules", ".bin");
+			fs.mkdirSync(path.join(temp, "src"), { recursive: true });
+			fs.mkdirSync(binDir, { recursive: true });
+			fs.writeFileSync(path.join(temp, "src", "file.ts"), "export const value = 1;\n", "utf-8");
+			const scriptPath = path.join(binDir, "tls-exit.js");
+			fs.writeFileSync(scriptPath, `process.stdin.once("data", () => { const body = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { capabilities: {} } }); process.stdout.write("Content-Length: " + Buffer.byteLength(body) + "\\r\\n\\r\\n" + body); process.stdin.destroy(); setTimeout(() => process.exit(0), 20); });\n`, "utf-8");
+			if (process.platform === "win32") {
+				fs.writeFileSync(path.join(binDir, "typescript-language-server.cmd"), `@echo off\r\n"${process.execPath}" "%~dp0\\tls-exit.js" %*\r\n`, "utf-8");
+			} else {
+				fs.writeFileSync(path.join(binDir, "typescript-language-server"), `#!/bin/sh\nexec "${process.execPath}" "$(dirname "$0")/tls-exit.js" "$@"\n`, { encoding: "utf-8", mode: 0o755 });
+			}
+
+			const diagnostics = await collectWatchdogLspDiagnostics({
+				cwd: temp,
+				root: temp,
+				changedPaths: ["src/file.ts"],
+				config: { enabled: true, timeoutMs: 2_000, maxFiles: 10, maxDiagnostics: 10 },
+			});
+
+			assert.equal(diagnostics.status, "failed");
+			assert.match(diagnostics.message ?? "", /EPIPE|language server exited|write after end/i);
+		} finally {
+			fs.rmSync(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+		}
+	});
+
 	it("suppresses repeated diagnostic identities until the file clears", () => {
 		const ledger = new WatchdogLspDiagnosticsLedger();
 		const diagnostic = {

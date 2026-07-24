@@ -260,6 +260,7 @@ class JsonRpcLspClient {
 	private readonly child: ChildProcessWithoutNullStreams;
 	private stderr = "";
 	private exited = false;
+	private transportFailure: Error | undefined;
 	private readonly exitWaiters: Array<() => void> = [];
 
 	constructor(child: ChildProcessWithoutNullStreams) {
@@ -268,15 +269,21 @@ class JsonRpcLspClient {
 		child.stderr.on("data", (chunk: Buffer) => {
 			this.stderr = `${this.stderr}${chunk.toString("utf-8")}`.slice(-MAX_STDERR_LENGTH);
 		});
-		child.stdin.on("error", (error) => this.rejectPending(error));
+		child.stdin.on("error", (error) => {
+			this.transportFailure ??= error;
+			this.rejectPending(error);
+		});
 		child.on("error", (error) => {
 			this.exited = true;
+			this.transportFailure ??= error;
 			this.rejectPending(error);
 			this.resolveExitWaiters();
 		});
 		child.on("exit", (code, signal) => {
 			this.exited = true;
-			this.rejectPending(new Error(`language server exited${code === null ? "" : ` with code ${code}`}${signal ? ` signal ${signal}` : ""}`));
+			const error = new Error(`language server exited${code === null ? "" : ` with code ${code}`}${signal ? ` signal ${signal}` : ""}`);
+			this.transportFailure ??= error;
+			this.rejectPending(error);
 			this.resolveExitWaiters();
 		});
 	}
@@ -311,6 +318,10 @@ class JsonRpcLspClient {
 
 	stderrTail(): string {
 		return this.stderr.trim();
+	}
+
+	failure(): Error | undefined {
+		return this.transportFailure;
 	}
 
 	private send(payload: JsonRpcMessage): void {
@@ -367,6 +378,7 @@ class JsonRpcLspClient {
 
 	private failProtocol(error: Error): void {
 		if (this.exited) return;
+		this.transportFailure ??= error;
 		this.rejectPending(error);
 		this.child.kill("SIGTERM");
 	}
@@ -424,9 +436,13 @@ function initializeParams(root: string): unknown {
 async function waitForDiagnostics(client: JsonRpcLspClient, targets: TargetFile[], timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
 	const started = Date.now();
 	while (!signal?.aborted && Date.now() - started < timeoutMs) {
+		const failure = client.failure();
+		if (failure) throw failure;
 		if (targets.every((target) => client.diagnostics.has(target.uri))) return true;
 		await new Promise((resolve) => setTimeout(resolve, Math.min(50, Math.max(1, timeoutMs - (Date.now() - started)))));
 	}
+	const failure = client.failure();
+	if (failure) throw failure;
 	return targets.every((target) => client.diagnostics.has(target.uri));
 }
 
