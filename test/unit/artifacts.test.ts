@@ -106,6 +106,25 @@ describe("project-local artifact paths", () => {
 		}
 	});
 
+	it("does not trust a configured agent directory that traverses a symlink", { skip: process.platform === "win32" }, () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-artifact-agent-anchor-"));
+		const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pi-artifact-agent-outside-"));
+		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+		try {
+			fs.mkdirSync(path.join(outside, "agent"));
+			fs.symlinkSync(outside, path.join(root, "link"), "dir");
+			process.env.PI_CODING_AGENT_DIR = path.join(root, "link", "agent");
+			const escaped = path.join(process.env.PI_CODING_AGENT_DIR, "sessions", "session", "subagent-artifacts");
+			assert.throws(() => ensureArtifactsDir(escaped), /must not contain a symlink/);
+			assert.equal(fs.existsSync(path.join(outside, "agent", "sessions")), false);
+		} finally {
+			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+			fs.rmSync(root, { recursive: true, force: true });
+			fs.rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
 	it("does not clean through a symlink artifact root", { skip: process.platform === "win32" }, () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-artifacts-"));
 		try {

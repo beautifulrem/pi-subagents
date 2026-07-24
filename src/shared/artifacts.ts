@@ -71,25 +71,37 @@ export function getArtifactPaths(artifactsDir: string, runId: string, agent: str
 	};
 }
 
-function artifactTrustAnchor(dir: string): string {
-	const resolved = path.resolve(dir);
-	const candidates = [process.cwd(), getAgentDir(), os.tmpdir()]
-		.map((candidate) => path.resolve(candidate))
-		.filter((candidate) => {
-			const relative = path.relative(candidate, resolved);
-			return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
-		});
-	return candidates.sort((left, right) => right.length - left.length)[0] ?? path.parse(resolved).root;
+function containsPath(root: string, target: string): boolean {
+	const relative = path.relative(root, target);
+	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
 }
 
-function assertNoArtifactSymlinkComponents(dir: string): void {
+function artifactTrustAnchor(dir: string): string {
+	const resolved = path.resolve(dir);
+	for (const root of [os.tmpdir(), os.homedir()].map((candidate) => path.resolve(candidate))) {
+		if (containsPath(root, resolved)) return root;
+	}
+	const cwd = path.resolve(process.cwd());
+	return containsPath(cwd, resolved) ? cwd : path.parse(resolved).root;
+}
+
+function artifactDirectoryIdentity(dir: string): string {
 	const resolved = path.resolve(dir);
 	const anchor = artifactTrustAnchor(resolved);
 	let current = anchor;
-	for (const component of path.relative(anchor, resolved).split(path.sep).filter(Boolean)) {
-		current = path.join(current, component);
-		if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) throw new Error(`Artifact path must not contain a symlink: ${current}`);
+	const identities: string[] = [];
+	for (const component of ["", ...path.relative(anchor, resolved).split(path.sep).filter(Boolean)]) {
+		if (component) current = path.join(current, component);
+		if (!fs.existsSync(current)) continue;
+		const stat = fs.lstatSync(current);
+		if (component && stat.isSymbolicLink()) throw new Error(`Artifact path must not contain a symlink: ${current}`);
+		identities.push(`${current}:${stat.dev}:${stat.ino}`);
 	}
+	return identities.join("|");
+}
+
+function assertNoArtifactSymlinkComponents(dir: string): void {
+	artifactDirectoryIdentity(dir);
 }
 
 export function ensureArtifactsDir(dir: string): void {
@@ -105,11 +117,16 @@ export function ensureArtifactsDir(dir: string): void {
 }
 
 export function openPrivateArtifactFile(filePath: string, append: boolean): number {
+	const parent = path.dirname(filePath);
+	ensureArtifactsDir(parent);
 	if (fs.existsSync(filePath) && fs.lstatSync(filePath).isSymbolicLink()) throw new Error(`Artifact file must not be a symlink: ${filePath}`);
+	const parentIdentity = artifactDirectoryIdentity(parent);
 	const noFollow = process.platform === "win32" ? 0 : (fs.constants.O_NOFOLLOW ?? 0);
-	const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | (append ? fs.constants.O_APPEND : fs.constants.O_TRUNC) | noFollow;
+	const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | (append ? fs.constants.O_APPEND : 0) | noFollow;
 	const fd = fs.openSync(filePath, flags, PRIVATE_FILE_MODE);
 	try {
+		if (artifactDirectoryIdentity(parent) !== parentIdentity) throw new Error(`Artifact parent changed while opening file: ${parent}`);
+		if (!append) fs.ftruncateSync(fd, 0);
 		if (process.platform !== "win32") fs.fchmodSync(fd, PRIVATE_FILE_MODE);
 		return fd;
 	} catch (error) {
