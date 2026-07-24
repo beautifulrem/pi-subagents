@@ -63,8 +63,10 @@ import {
 	type ResolvedToolBudget,
 	type SingleResult,
 	type ToolBudgetConfig,
+	DEFAULT_MAX_OUTPUT,
 	MAX_CONCURRENCY,
 	resolveChildMaxSubagentDepth,
+	truncateOutput,
 } from "../../shared/types.ts";
 import { resolveEffectiveSubagentModel } from "../shared/model-fallback.ts";
 import type { ModelScopeConfig } from "../shared/model-scope.ts";
@@ -448,6 +450,33 @@ interface ChainExecutionResult {
 		chain: ChainStep[];
 		chainSkills: string[];
 	};
+}
+
+function terminalChainOutput(steps: ChainStep[], results: SingleResult[], outputs: ChainOutputMap): string {
+	const finalStep = steps.at(-1);
+	if (!finalStep) return "";
+
+	let output: string;
+	if (isDynamicParallelStep(finalStep)) {
+		const collected = outputs[finalStep.collect.as]?.structured;
+		if (!Array.isArray(collected) || collected.length === 0) return "[]";
+		const items = collected as DynamicCollectedResult[];
+		output = aggregateParallelOutputs(
+			items.map((item) => ({ agent: item.agent, output: item.structured !== undefined ? JSON.stringify(item.structured) : item.text, exitCode: item.exitCode, error: item.error, timedOut: item.timedOut })),
+			(index, agent) => `=== Final item ${items[index]?.key ?? index}: ${agent} ===`,
+		);
+	} else if (isParallelStep(finalStep)) {
+		const finalResults = results.slice(-finalStep.parallel.length);
+		output = aggregateParallelOutputs(
+			finalResults.map((result) => ({ agent: result.agent, output: outputEntryFromResult(result, steps.length - 1).text, exitCode: result.exitCode, error: result.error, timedOut: result.timedOut })),
+			(index, agent) => `=== Final task ${index + 1}: ${agent} ===`,
+		);
+	} else {
+		const finalResult = results.at(-1);
+		output = finalResult ? outputEntryFromResult(finalResult, steps.length - 1).text : "";
+	}
+
+	return truncateOutput(output, DEFAULT_MAX_OUTPUT).text;
 }
 
 /**
@@ -1338,7 +1367,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 		}
 	}
 
-	const summary = buildChainSummary(chainSteps, results, chainDir, "completed");
+	const summary = buildChainSummary(chainSteps, results, chainDir, "completed", undefined, terminalChainOutput(chainSteps, results, outputs));
 
 	return {
 		content: [{ type: "text", text: summary }],

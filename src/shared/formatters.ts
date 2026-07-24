@@ -61,6 +61,7 @@ export function buildChainSummary(
 	chainDir: string,
 	status: "completed" | "failed",
 	failedStep?: { index: number; error: string },
+	completedOutput?: string,
 ): string {
 	const stepNames = steps
 		.map((step) => (isParallelStep(step) ? `parallel[${step.parallel.length}]` : isDynamicParallelStep(step) ? `expand:${step.parallel.agent}` : step.agent))
@@ -80,6 +81,9 @@ export function buildChainSummary(
 	if (status === "completed") {
 		const stepWord = results.length === 1 ? "step" : "steps";
 		return `✅ Chain completed: ${stepNames} (${results.length} ${stepWord}, ${durationStr})${skillsLine ? `\n${skillsLine}` : ""}
+
+📤 Final output:
+${completedOutput?.trim() ? completedOutput : "(empty)"}
 
 📋 Progress: ${hasProgress ? progressPath : "(none)"}
 📁 Artifacts: ${chainDir}`;

@@ -702,6 +702,10 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		);
 
 		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
+		assert.match(summary, /\{"ok":"a"\}/);
+		assert.match(summary, /\{"ok":"b"\}/);
+		assert.doesNotMatch(summary, /acceptance-report/);
 		const dynamicNode = result.details.workflowGraph?.nodes[1];
 		assert.equal(dynamicNode?.acceptanceStatus, "checked");
 		assert.deepEqual(dynamicNode?.children?.map((child) => child.acceptanceStatus), ["checked", "checked"]);
@@ -733,6 +737,10 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 
 		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
 		assert.deepEqual(result.details.results.map((child) => child.acceptance?.status), ["not-required", "not-required", "not-required"]);
+		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
+		assert.match(summary, /EXACT_alpha/);
+		assert.match(summary, /EXACT_beta/);
+		assert.doesNotMatch(summary, /targets/);
 		const dynamicNode = result.details.workflowGraph?.nodes[1];
 		assert.equal(dynamicNode?.acceptanceStatus, "not-required");
 		assert.deepEqual(dynamicNode?.children?.map((child) => child.acceptanceStatus), ["not-required", "not-required"]);
@@ -1029,6 +1037,9 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 
 		assert.ok(!result.isError);
 		assert.deepEqual(result.details.results[0]?.structuredOutput, { ok: true, note: "captured" });
+		const structuredSummary = result.content[0]?.type === "text" ? result.content[0].text : "";
+		assert.match(structuredSummary, /\{"ok":true,"note":"captured"\}/);
+		assert.doesNotMatch(structuredSummary, /prose/);
 
 		mockPi.reset();
 		mockPi.onCall({ structuredOutput: { ok: true, note: "tool-only" } });
@@ -1155,8 +1166,10 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.equal(mockPi.callCount(), 1);
 	});
 
-	it("runs a 3-step chain end-to-end", async () => {
-		mockPi.onCall({ output: "Step output" });
+	it("runs a 3-step chain end-to-end and relays only terminal output", async () => {
+		mockPi.onCall({ output: "Scout intermediate" });
+		mockPi.onCall({ output: "Plan intermediate" });
+		mockPi.onCall({ output: "Final answer" });
 		const agents = [makeAgent("scout"), makeAgent("planner"), makeAgent("executor")];
 
 		const result = await executeChain(
@@ -1173,6 +1186,23 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.ok(!result.isError);
 		assert.equal(result.details.results.length, 3);
 		assert.ok(result.details.results.every((r) => r.exitCode === 0));
+		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
+		assert.match(summary, /Final answer/);
+		assert.doesNotMatch(summary, /Scout intermediate|Plan intermediate/);
+	});
+
+	it("bounds relayed terminal chain output", async () => {
+		mockPi.onCall({ output: "x".repeat(210 * 1024) });
+		const agents = [makeAgent("worker")];
+
+		const result = await executeChain(
+			makeChainParams([{ agent: "worker", task: "Return a large result" }], agents),
+		);
+
+		assert.ok(!result.isError);
+		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
+		assert.match(summary, /\[TRUNCATED:/);
+		assert.ok(Buffer.byteLength(summary, "utf-8") < 205 * 1024, "summary should remain bounded");
 	});
 
 	it("runs a 40-step alternating worker and reviewer chain", async () => {
@@ -1386,6 +1416,9 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 
 		assert.ok(!result.isError, `should succeed: ${JSON.stringify(result.content)}`);
 		assert.equal(result.details.results.length, 2);
+		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
+		assert.match(summary, /=== Final task 1: reviewer-a ===/);
+		assert.match(summary, /=== Final task 2: reviewer-b ===/);
 	});
 
 	it("aggregates parallel outputs for next sequential step", async () => {
