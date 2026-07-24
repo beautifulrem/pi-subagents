@@ -1030,6 +1030,7 @@ export interface AsyncJobState {
 	totalTokens?: TokenUsage;
 	sessionFile?: string;
 	controlEventCursor?: number;
+	controlEventFileId?: string;
 	controlEventSkippingOversizedLine?: boolean;
 	nestedRoute?: NestedRouteInfo;
 	nestedChildren?: NestedRunSummary[];
@@ -1317,7 +1318,7 @@ export interface ExtensionConfig {
 	worktreeBaseDir?: string;
 	/** Where to store subagent artifact files. Defaults to "project" (cwd/.pi-subagents). Set to "session" for pi session dir, or "temp" for OS temp. */
 	artifactDir?: ArtifactDirPreference;
-	/** Relay full subagent results through an external intercom adapter. Defaults to true. */
+	/** Relay full subagent results through an external intercom adapter. Defaults to false. */
 	resultIntercom?: boolean;
 	intercomBridge?: IntercomBridgeConfig;
 	proactiveSkillSubagents?: ProactiveSkillSubagentsConfig | false;
