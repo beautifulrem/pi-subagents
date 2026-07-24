@@ -1111,6 +1111,52 @@ describe("result watcher", () => {
 		}
 	});
 
+	it("does not recover an active claim during prime or polling", async () => {
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-active-claim-"));
+		try {
+			const state = createState();
+			state.currentSessionId = "session-1";
+			const delivered: string[] = [];
+			let releaseOld!: () => void;
+			let sawOld!: () => void;
+			let oldAttempts = 0;
+			const oldStarted = new Promise<void>((resolve) => { sawOld = resolve; });
+			const oldReleased = new Promise<void>((resolve) => { releaseOld = resolve; });
+			const watcher = createResultWatcher({ events: { on: () => () => {}, emit() {} } }, state, resultsDir, 60_000, {
+				notifier: { async deliver(result) {
+					const id = String(result.id);
+					delivered.push(id);
+					if (id === "active-old" && ++oldAttempts === 1) {
+						sawOld();
+						await oldReleased;
+						return false;
+					}
+					return true;
+				} },
+			});
+			const resultPath = path.join(resultsDir, "active.json");
+			fs.writeFileSync(resultPath, JSON.stringify({ id: "active-old", sessionId: "session-1", agent: "worker", success: true, summary: "old" }), "utf-8");
+			try {
+				watcher.primeExistingResults();
+				await oldStarted;
+				watcher.primeExistingResults();
+				assert.equal(fs.existsSync(resultPath), false);
+				assert.equal(fs.readdirSync(path.join(resultsDir, ".processing")).length, 1);
+				fs.writeFileSync(resultPath, JSON.stringify({ id: "active-new", sessionId: "session-1", agent: "worker", success: true, summary: "new" }), "utf-8");
+				releaseOld();
+				const deadline = Date.now() + 1500;
+				while ((oldAttempts < 2 || !delivered.includes("active-new")) && Date.now() <= deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+			} finally {
+				watcher.stopResultWatcher();
+			}
+			assert.equal(oldAttempts, 2);
+			assert.equal(delivered.includes("active-new"), true);
+			assert.deepEqual(fs.readdirSync(path.join(resultsDir, ".processing")), []);
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+	});
+
 	it("recovers a durable pre-delivery claim after watcher restart", async () => {
 		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-claim-recovery-"));
 		try {

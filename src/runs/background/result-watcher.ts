@@ -24,6 +24,11 @@ import type { CompletionNotifier, CompletionNotification } from "./notify.ts";
 const WATCHER_RESTART_DELAY_MS = 3000;
 const POLL_INTERVAL_MS = 3000;
 const RETRY_DELAY_MS = 100;
+const ACTIVE_RESULT_CLAIMS_KEY = "__piSubagentActiveResultClaims";
+const activeResultClaims = (() => {
+	const store = globalThis as typeof globalThis & { [ACTIVE_RESULT_CLAIMS_KEY]?: Set<string> };
+	return store[ACTIVE_RESULT_CLAIMS_KEY] ??= new Set<string>();
+})();
 
 type ResultWatcherFs = Pick<typeof fs, "existsSync" | "readFileSync" | "unlinkSync" | "renameSync" | "readdirSync" | "mkdirSync" | "realpathSync" | "watch">;
 
@@ -153,8 +158,10 @@ export function createResultWatcher(
 		for (const claim of fsApi.readdirSync(processingDir)) {
 			const file = claimedOriginalFile(claim);
 			if (!file) continue;
+			const claimPath = path.join(processingDir, claim);
+			if (activeResultClaims.has(claimPath)) continue;
 			try {
-				restoreClaim(path.join(processingDir, claim), file, triggerTurn, false);
+				restoreClaim(claimPath, file, triggerTurn, false);
 			} catch (error) {
 				console.error(`Failed to recover claimed subagent result '${path.join(processingDir, claim)}':`, error);
 			}
@@ -175,6 +182,7 @@ export function createResultWatcher(
 			fsApi.mkdirSync(processingDir, { recursive: true });
 			claimPath = path.join(processingDir, claimFileName(file));
 			fsApi.renameSync(resultPath, claimPath);
+			activeResultClaims.add(claimPath);
 			didClaim = true;
 			const data = JSON.parse(fsApi.readFileSync(claimPath, "utf-8")) as ResultFileData;
 			if (typeof data.sessionId !== "string" || !ownsSession(data.sessionId, epoch)) return;
@@ -306,6 +314,7 @@ export function createResultWatcher(
 		} catch (error) {
 			if (!isNotFound(error)) console.error(`Failed to process subagent result file '${resultPath}':`, error);
 		} finally {
+			if (claimPath) activeResultClaims.delete(claimPath);
 			if (claimPath && fsApi.existsSync(claimPath)) {
 				try {
 					restoreClaim(claimPath, file, triggerTurn);
