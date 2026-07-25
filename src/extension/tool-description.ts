@@ -72,7 +72,7 @@ SCHEDULE (opt-in; requires { "scheduledRuns": { "enabled": true } } in config.js
 • { action: "schedule-cancel", id: "..." } - cancel a scheduled run before it fires
 
 DIAGNOSTICS:
-• { action: "doctor" } - read-only report for runtime paths, discovery, sessions, and intercom
+• { action: "doctor" } - read-only report for runtime/source identity, paths, discovery, sessions, and intercom
 
 ${SUBAGENT_SAFETY_GUIDANCE}`;
 

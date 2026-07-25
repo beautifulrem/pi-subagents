@@ -294,6 +294,8 @@ or ask:
 Check whether subagents and intercom are set up correctly.
 ```
 
+Doctor also reports the loaded extension module/package root, a deterministic SHA-256 snapshot of the npm runtime source surface, local Git HEAD/tree/cleanliness when available, and SHA-256 identities for the Node executable, Pi entry file, and settings file. It prints settings identity, not settings content or secret values. These are diagnostic provenance signals, not a sandbox, signature, or guarantee against same-user tampering.
+
 ## Recommended orchestration pattern (scaffolding)
 
 Use orchestration as parent-agent guidance, not as a runtime workflow mode. For implementation work, the recommended loop is:
