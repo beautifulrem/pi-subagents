@@ -4,7 +4,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Usage, SingleResult } from "./types.ts";
+import type { ModelAttempt, Usage, SingleResult } from "./types.ts";
 import type { ChainStep } from "./settings.ts";
 import { isDynamicParallelStep, isParallelStep } from "./settings.ts";
 import { splitKnownThinkingSuffix, THINKING_LEVELS } from "./model-info.ts";
@@ -41,6 +41,41 @@ export function formatUsage(u: Usage, model?: string): string {
 	if (u.cost) parts.push(`$${u.cost.toFixed(4)}`);
 	if (model) parts.push(model);
 	return parts.join(" ");
+}
+
+export function formatModelAttemptUsage(attempts: ModelAttempt[] | undefined): string {
+	if (!Array.isArray(attempts)) return "";
+	const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+	let usageValid = true;
+	let validCount = 0;
+	let failed = 0;
+	const count = (input: unknown): number => {
+		if (input === undefined) return 0;
+		if (typeof input !== "number" || !Number.isSafeInteger(input) || input < 0) usageValid = false;
+		return typeof input === "number" && Number.isSafeInteger(input) && input >= 0 ? input : 0;
+	};
+	const cost = (input: unknown): number => {
+		if (input === undefined) return 0;
+		if (typeof input !== "number" || !Number.isFinite(input) || input < 0) usageValid = false;
+		return typeof input === "number" && Number.isFinite(input) && input >= 0 ? input : 0;
+	};
+	for (const attempt of attempts) {
+		if (!attempt || typeof attempt !== "object" || Array.isArray(attempt) || typeof attempt.success !== "boolean") continue;
+		validCount++;
+		if (!attempt.success) failed++;
+		if (attempt.usage !== undefined && (!attempt.usage || typeof attempt.usage !== "object" || Array.isArray(attempt.usage))) usageValid = false;
+		for (const field of ["input", "output", "cacheRead", "cacheWrite", "turns"] as const) {
+			const sum = usage[field] + count(attempt.usage?.[field]);
+			if (!Number.isSafeInteger(sum)) usageValid = false;
+			else usage[field] = sum;
+		}
+		const costSum = usage.cost + cost(attempt.usage?.cost);
+		if (!Number.isFinite(costSum)) usageValid = false;
+		else usage.cost = costSum;
+	}
+	if (validCount === 0) return "";
+	const attemptText = `${validCount} attempt${validCount === 1 ? "" : "s"}${failed ? ` (${failed} failed)` : ""}`;
+	return [usageValid ? formatUsage(usage) : "", attemptText].filter(Boolean).join(" · ");
 }
 
 /**

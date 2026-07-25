@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { formatDuration, formatModelThinking, formatTokens, shortenPath } from "../../shared/formatters.ts";
+import { formatDuration, formatModelAttemptUsage, formatModelThinking, formatTokens, shortenPath } from "../../shared/formatters.ts";
 import { formatActivityLabel, formatParallelOutcome } from "../../shared/status-format.ts";
 import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type CostSummary, type NestedRunSummary, type SteeringStatus, type SubagentRunMode, type TokenUsage, type TurnBudgetState } from "../../shared/types.ts";
 import { readStatus } from "../../shared/utils.ts";
@@ -39,6 +39,7 @@ interface AsyncRunStepSummary {
 	model?: string;
 	thinking?: string;
 	attemptedModels?: string[];
+	modelAttempts?: AsyncJobStep["modelAttempts"];
 	sessionFile?: string;
 	transcriptPath?: string;
 	error?: string;
@@ -249,6 +250,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.model ? { model: step.model } : {}),
 			...(step.thinking ? { thinking: step.thinking } : {}),
 			...(step.attemptedModels ? { attemptedModels: step.attemptedModels } : {}),
+			...(step.modelAttempts ? { modelAttempts: step.modelAttempts } : {}),
 			...(step.sessionFile ? { sessionFile: step.sessionFile } : {}),
 			...(step.transcriptPath ? { transcriptPath: step.transcriptPath } : {}),
 			...(step.error ? { error: step.error } : {}),
@@ -423,6 +425,8 @@ function formatStepLine(step: AsyncRunStepSummary): string {
 	if (activity) parts.push(activity);
 	const modelThinking = formatModelThinking(step.model, step.thinking);
 	if (modelThinking) parts.push(modelThinking);
+	const attemptUsage = formatModelAttemptUsage(step.modelAttempts);
+	if (attemptUsage) parts.push(attemptUsage);
 	const queueDurationMs = step.queueDurationMs ?? (step.status === "pending" && step.runnableAt !== undefined ? Math.max(0, Date.now() - step.runnableAt) : undefined);
 	if (queueDurationMs !== undefined) parts.push(`queue ${formatDuration(queueDurationMs)}`);
 	if (step.durationMs !== undefined) parts.push(formatDuration(step.durationMs));

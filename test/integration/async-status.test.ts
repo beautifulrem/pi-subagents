@@ -126,19 +126,36 @@ describe("async status helpers", () => {
 				startedAt: 100,
 				lastUpdate: 200,
 				steps: [
-					{ agent: "reviewer", status: "running", model: "openai-codex/gpt-5.5:high" },
-					{ agent: "scout", status: "running", model: "anthropic/claude-haiku-4-5", thinking: "low" },
-					{ agent: "local", status: "running", model: "ollama/qwen2.5-coder:7b" },
-					{ agent: "fallback", status: "running", model: "anthropic/claude-sonnet-4-5:low", thinking: "high" },
+					{
+						agent: "reviewer",
+						status: "running",
+						model: "openai-codex/gpt-5.5:high",
+						modelAttempts: [
+							{ model: "openai-codex/gpt-5.4", success: false, usage: { input: 100, output: 10, cacheRead: 50, cacheWrite: 20, cost: 0.001, turns: 1 } },
+							{ model: "openai-codex/gpt-5.5:high", success: true, usage: { input: 200, output: 20, cacheRead: 100, cacheWrite: 0, cost: 0.002, turns: 1 } },
+						],
+					},
+					{ agent: "scout", status: "running", model: "anthropic/claude-haiku-4-5", thinking: "low", modelAttempts: { invalid: true } },
+					{ agent: "local", status: "running", model: "ollama/qwen2.5-coder:7b", modelAttempts: [{ model: "ollama/qwen2.5-coder:7b", success: false, usage: { input: "bad", cacheRead: -1 } }] },
+					{
+						agent: "fallback",
+						status: "running",
+						model: "anthropic/claude-sonnet-4-5:low",
+						thinking: "high",
+						modelAttempts: [
+							{ model: "anthropic/claude-haiku-4-5", success: false, usage: { input: Number.MAX_SAFE_INTEGER, output: 0, cacheRead: 0, cacheWrite: 0, cost: Number.MAX_VALUE, turns: 1 } },
+							{ model: "anthropic/claude-sonnet-4-5:low", success: true, usage: { input: Number.MAX_SAFE_INTEGER, output: 0, cacheRead: 0, cacheWrite: 0, cost: Number.MAX_VALUE, turns: 1 } },
+						],
+					},
 				],
 			});
 
 			const text = formatAsyncRunList(listAsyncRuns(root, { states: ["running"] }));
-			assert.match(text, /1\. reviewer \| running \| gpt-5\.5 · thinking high/);
+			assert.match(text, /1\. reviewer \| running \| gpt-5\.5 · thinking high \| 2 turns in:300 out:30 R150 W20 \$0\.0030 · 2 attempts \(1 failed\)/);
 			assert.match(text, /2\. scout \| running \| claude-haiku-4-5 · thinking low/);
-			assert.match(text, /3\. local \| running \| qwen2\.5-coder:7b(?! · thinking)/);
-			assert.match(text, /4\. fallback \| running \| claude-sonnet-4-5 · thinking low/);
-			assert.doesNotMatch(text, /openai-codex\/gpt-5\.5/);
+			assert.match(text, /3\. local \| running \| qwen2\.5-coder:7b \| 1 attempt \(1 failed\)/);
+			assert.match(text, /4\. fallback \| running \| claude-sonnet-4-5 · thinking low \| 2 attempts \(1 failed\)/);
+			assert.doesNotMatch(text, /Infinity|openai-codex\/gpt-5\.5/);
 			assert.doesNotMatch(text, /gpt-5\.5:high/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
