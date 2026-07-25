@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { formatModelThinking } from "../../src/shared/formatters.ts";
+import { formatModelAttemptUsage, formatModelThinking } from "../../src/shared/formatters.ts";
 import { aggregateStepStatus, formatActivityLabel, formatParallelOutcome } from "../../src/shared/status-format.ts";
 import type { AsyncJobStep } from "../../src/shared/types.ts";
 
@@ -15,6 +15,13 @@ describe("status format helpers", () => {
 	it("formats max thinking from model suffixes and explicit metadata", () => {
 		assert.equal(formatModelThinking("openai/gpt-5:max"), "gpt-5 · thinking max");
 		assert.equal(formatModelThinking("openai/gpt-5", "max"), "gpt-5 · thinking max");
+	});
+
+	it("labels model-attempt usage partial when any attempt is unobserved", () => {
+		assert.equal(formatModelAttemptUsage([
+			{ model: "primary", success: false },
+			{ model: "fallback", success: true, usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.01, turns: 1 } },
+		]), "1 turn in:10 out:5 $0.0100 · usage partial · 2 attempts (1 failed)");
 	});
 
 	it("aggregates step status and parallel outcomes", () => {

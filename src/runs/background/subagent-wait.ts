@@ -9,7 +9,7 @@
  * turn: once the turn ends there is nothing left to receive the notification.
  *
  * `subagent_wait` closes that gap. It keeps the turn alive until a tracked async
- * run for this session reaches a terminal state (complete / failed / paused),
+ * run for this session reaches a terminal state (complete / failed / paused / stopped),
  * the caller-supplied timeout elapses, or the turn is aborted. Because it awaits
  * inside the turn, the completion the model was told to wait for is actually
  * observed before the tool returns.
@@ -287,7 +287,7 @@ function allRunsForSession(params: SubagentWaitParams, deps: SubagentWaitDeps): 
 
 function summarizeTerminalRuns(runs: AsyncRunSummary[], providerFinishedCount = 0): string {
 	if (runs.length === 0 && providerFinishedCount === 0) return "";
-	const counts = { complete: 0, failed: 0, paused: 0 } as Record<string, number>;
+	const counts = { complete: 0, failed: 0, paused: 0, stopped: 0 } as Record<string, number>;
 	for (const run of runs) {
 		if (run.state in counts) counts[run.state] += 1;
 	}
@@ -295,6 +295,7 @@ function summarizeTerminalRuns(runs: AsyncRunSummary[], providerFinishedCount = 
 	if (counts.complete) parts.push(`${counts.complete} complete`);
 	if (counts.failed) parts.push(`${counts.failed} failed`);
 	if (counts.paused) parts.push(`${counts.paused} paused`);
+	if (counts.stopped) parts.push(`${counts.stopped} stopped`);
 	if (providerFinishedCount > 0) parts.push(`${providerFinishedCount} provider item(s) finished`);
 	return parts.join(", ");
 }

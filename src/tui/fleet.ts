@@ -40,6 +40,7 @@ export interface FleetViewOptions {
 	refreshMs?: number;
 	initialKey?: string;
 	markdownTheme?: MarkdownTheme;
+	now?: () => number;
 }
 
 function belongsToCurrentSession(sessionId: string | undefined, currentSessionId: string | null): boolean {
@@ -346,7 +347,7 @@ function itemSource(item: FleetItem): string {
 	return item.kind === "foreground-active" ? "foreground · live" : "foreground · recent";
 }
 
-function itemStats(item: FleetItem): string[] {
+function itemStats(item: FleetItem, now: number): string[] {
 	let model: string | undefined;
 	let tokens: number | undefined;
 	let tools: number | undefined;
@@ -355,7 +356,7 @@ function itemStats(item: FleetItem): string[] {
 		const live = item.activeChild ?? item.control;
 		tokens = live.tokens;
 		tools = live.toolCount;
-		durationMs = Math.max(0, Date.now() - live.startedAt);
+		durationMs = Math.max(0, now - live.startedAt);
 	} else if (item.kind === "foreground-recent") {
 		tokens = item.child.tokens;
 		tools = item.child.toolCount;
@@ -364,7 +365,7 @@ function itemStats(item: FleetItem): string[] {
 		tokens = item.step?.tokens?.total ?? (item.index === undefined ? item.run.totalTokens?.total : undefined);
 		tools = item.step?.toolCount ?? (item.index === undefined ? item.run.toolCount : undefined);
 		durationMs = item.step?.durationMs
-			?? Math.max(0, (item.run.endedAt ?? Date.now()) - item.run.startedAt);
+			?? Math.max(0, (item.run.endedAt ?? now) - item.run.startedAt);
 	}
 	return [
 		model,
@@ -374,14 +375,14 @@ function itemStats(item: FleetItem): string[] {
 	].filter((value): value is string => Boolean(value));
 }
 
-function structuredHeader(item: FleetItem, width: number, theme: Theme, conversationState: string): string[] {
+function structuredHeader(item: FleetItem, width: number, theme: Theme, conversationState: string, now: number): string[] {
 	const lines: string[] = [];
 	lines.push(rightAligned(` ${statusGlyph(item, theme)} ${theme.bold(item.agent)}`, theme.fg("dim", item.state), width));
 	const child = item.index !== undefined ? ` · child ${item.index + 1}` : "";
 	const context = itemContext(item);
 	const identity = `${itemSource(item)} · ${item.runId.slice(0, 8)}${child} · ${itemMode(item)}${context ? ` ${context}` : ""}`;
 	lines.push(`  ${theme.fg("dim", identity)}`);
-	const stats = itemStats(item);
+	const stats = itemStats(item, now);
 	if (stats.length) lines.push(`  ${theme.fg("muted", stats.join(" · "))}`);
 	if (item.description) {
 		const task = item.description.replace(/\s+/g, " ").trim();
@@ -566,7 +567,7 @@ export class SubagentFleetComponent implements Component {
 							: latest?.kind === "tool"
 								? `${latest.name} · ${latest.status}`
 								: "activity";
-					return { header: structuredHeader(selected, width, this.theme, conversationState), body };
+					return { header: structuredHeader(selected, width, this.theme, conversationState, this.options.now?.() ?? Date.now()), body };
 				}
 			}
 		}

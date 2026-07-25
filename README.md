@@ -1,20 +1,14 @@
-<p>
-  <img src="https://raw.githubusercontent.com/nicobailon/pi-subagents/main/banner.png" alt="pi-subagents" width="1100">
-</p>
-
 # pi-subagents
 
 `pi-subagents` lets Pi delegate work to focused child agents. Use it for code review, scouting, implementation, parallel audits, saved workflows, background jobs, and anything else that benefits from a second or third set of model eyes.
 
-https://github.com/user-attachments/assets/702554ec-faaf-4635-80aa-fb5d6e292fd1
+## Local installation
 
-## Installation
+This checkout is a private, local-only Pi harness. Pi loads it through the
+`local-packages/pi-subagents` entry in `~/.pi/agent/settings.json`.
 
-```bash
-pi install npm:pi-subagents
-```
-
-That is the only required step. You can add optional pieces later.
+It is not configured for npm publication or an upstream pull-request/issue
+workflow. Keep changes and commits in this local Git checkout.
 
 ## Try this first
 
@@ -157,7 +151,20 @@ For a persistent override, edit settings. This example pins the reviewer everywh
 
 Use `~/.pi/agent/settings.json` for a user override or the project config settings file (`.pi/settings.json` in standard Pi) for a project override. `subagents.defaultModel` applies to builtin, package, user, and project agents that do not set `model` in frontmatter. Per-run model overrides and `agentOverrides.<name>.model` still win, and explicit agent frontmatter still wins over the global default. The same `agentOverrides` block can change `tools`, `skills`, inherited context, prompt text, or disable a builtin. Matching user and project agents also receive override fields that their frontmatter leaves unset, so a shared project config agent can keep the persona while local settings choose the model.
 
-If your provider rejects model IDs with thinking suffixes, set `subagents.disableThinking: true` in user or project settings. That clears bundled builtin thinking defaults in one place; an explicit higher-precedence `agentOverrides.<name>.thinking` value can opt a role back in.
+Set `subagents.defaultThinking` to give builtin, package, user, and project agents without a `thinking` value a shared thinking level, independent of the parent session's default. Project settings win over user settings. Explicit frontmatter, `agentOverrides.<name>.thinking`, and per-run thinking overrides still win; `thinking: false` remains an explicit opt-out:
+
+```json
+{
+  "subagents": {
+    "defaultThinking": "medium",
+    "agentOverrides": {
+      "reviewer": { "thinking": "high" }
+    }
+  }
+}
+```
+
+If your provider rejects model IDs with thinking suffixes, set `subagents.disableThinking: true` in user or project settings. That clears bundled builtin thinking defaults in one place; an explicit higher-precedence `agentOverrides.<name>.thinking` value can opt a role back in. Existing custom-agent frontmatter remains authoritative.
 
 To inspect what `pi-subagents` has actually loaded right now, use:
 
@@ -256,6 +263,8 @@ You can also ask naturally:
 Show me the current async runs.
 ```
 
+Lifecycle artifact v3 adds `process-terminal-candidate.json` (private runner evidence) and `process-terminal.json` (the public proof projection). A proof is `observed` only after the live parent observes the exact detached runner's `close` event, every recorded child writer has a close record, and any tracked canonical-session lease is free. If the observer is unavailable, the proof is `unknown`; do not infer process exit from `endedAt`, result-file existence, PID disappearance, or lease-directory absence. The `subagent:process-terminal` event and RPC `ping.capabilities.processTerminalProof` expose this status. Process proof is point-in-time evidence and remains separate from execution success or stopped/non-resumable state.
+
 Async runs also write machine-readable lifecycle artifacts for observability and workflow gates. For a top-level async run, `details.asyncDir` points at a directory containing `status.json`, `events.jsonl`, `output-<index>.log`, and `subagent-log-<runId>.md`; the final summary is written to Pi's subagent results directory as `<runId>.json`. Nested async runs use the same shape under the nested async root and are discoverable through status projections that read the nested-run registry. These files are append/update artifacts only; interactive foreground behavior is unchanged.
 
 Foreground and async runners share bounded child-protocol handling. A child JSONL line above 16 MiB fails with structured `protocolError` code `protocol_output_limit`, stderr retains only its latest 128 KiB, split UTF-8 and final unterminated JSON events remain valid, and `agent_end.willRetry` defers completion until the child settles. Current Pi builds use `agent_settled` as the terminal watermark; older builds retain the bounded terminal-message fallback.
@@ -344,7 +353,7 @@ The child can use one dedicated coordination tool:
 
 - `contact_supervisor`: the child contacts the parent/supervisor session that delegated the task. Use `reason: "need_decision"` for blocking decisions or clarification, `reason: "interview_request"` for structured input, and `reason: "progress_update"` for short non-blocking updates when a discovery changes the plan. Do not ask for clarification when the only conflict is review-only/no-edit versus progress-writing or artifact-writing instructions; no-edit wins.
 
-The parent replies with `subagent_supervisor({ action: "reply", replyTo, message })` or checks pending requests with `subagent_supervisor({ action: "pending" })`. Supervisor messages are scoped to the exact Pi session id that spawned the child. A second Pi session in the same repository does not receive those requests.
+The parent replies with `subagent_supervisor({ action: "reply", replyTo, message })` or checks pending requests with `subagent_supervisor({ action: "pending" })`. New request/reply files use protocol v1 and bind the supervisor session plus child run, agent, index, and optional intercom targets; mismatched identities are rejected. Legacy unversioned request/reply files remain readable during the transition. A second Pi session in the same repository does not receive those requests.
 
 Child-side routine completion handoffs are still not expected. If a child appears stalled, needs-attention notices can show up in the parent session with useful next actions, such as checking `subagent({ action: "status" })`, interrupting the run, or nudging the child.
 
@@ -989,6 +998,33 @@ If you are writing an agent that orchestrates subagents, the bundled skill helps
 Pi extensions can request configured foreground agents through the public event
 contract exported by `pi-subagents/delegation`.
 
+### Launch contract preflight
+
+Use `pi-subagents/preflight` when an extension needs to inspect the resolved child launch contract before deciding whether to run anything:
+
+```ts
+import { resolveSubagentLaunchContract } from "pi-subagents/preflight";
+
+const result = await resolveSubagentLaunchContract({
+  agent: "reviewer",
+  task: "Review the current diff.",
+  context: "fresh",
+  cwd: ctx.cwd,
+  sessionRoot: "/tmp/my-extension-preflight-session-root",
+  availableModels: ctx.modelRegistry.getAvailable(),
+});
+
+if (!result.ok) {
+  // missing_agent, ambiguous_agent, missing_skill, denied_required_tool,
+  // invalid_artifact_dir, invalid_cwd, or unsupported_mode
+  throw new Error(result.message);
+}
+
+console.log(result.contract.digest, result.contract.tools.effectiveAllowlist);
+```
+
+Preflight covers ordinary single-agent launch resolution: selected agent identity and shadowed candidates, fresh/fork context, effective model and thinking, skill and tool resolution, direct MCP selections, runtime/configured extensions, artifact and session paths, package/lifecycle versions, capability-ceiling audit data, and a stable digest. It is side-effect-free for launch state: it does not create child sessions, temp prompt files, structured-output runtimes, tool-diagnostic files, or run artifacts. Some host-owned facts, such as exact fork snapshots and live model registries, can only be proven by the Pi host; those appear as `host_required` diagnostics instead of silently pretending to be exact.
+
 ### Delegation v1
 
 The compatibility v1 contract runs one configured foreground agent per request:
@@ -1105,6 +1141,26 @@ family. V2 remains foreground-only and inherits the configured agent's current
 tools, skills, context, model policy, and workspace authority; it is not a
 sandbox or a durable task broker. `pi-subagents/delegation` is the canonical
 contract for extension integrations.
+
+## Capability ceilings
+
+Parent extensions can enforce an out-of-band, session-scoped capability ceiling without adding a model-visible field to `subagent`:
+
+```ts
+import { registerSubagentCapabilityCeiling } from "pi-subagents/capability-ceiling";
+
+const restriction = registerSubagentCapabilityCeiling({
+  sessionId: ctx.sessionManager.getSessionId(),
+  source: "plan-mode",
+  ceiling: { allowedTools: ["read", "grep", "find", "ls"], denyExtensions: true },
+});
+// restriction.update(...) can only narrow this provider's current policy.
+// restriction.dispose() removes only this provider's registration.
+```
+
+Active registrations intersect their `allowedTools` sets and OR `denyExtensions`; an explicit empty list means no caller-facing tools, while an omitted list does not restrict names. The resolved snapshot is propagated monotonically to nested and async children and is retained for recovery. `structured_output` may remain as a package-owned internal protocol tool when an output schema requires it; it is not a caller capability. A denied lazy-skill `read` requirement fails before spawn rather than widening the ceiling.
+
+`denyExtensions` suppresses ambient, configured, and MCP provider extensions while retaining the package runtime needed for child protocol enforcement. This is a same-process policy boundary, not a sandbox against malicious code already running in the parent process. Schedules created while a ceiling is active are rejected until durable schedule persistence is available; unrestricted schedules remain subject to any policy active when they fire. Public status exposes bounded audit counts and sources, never full extension paths.
 
 ## Background-work provider API
 
@@ -1385,7 +1441,7 @@ Requirements:
 
 By default, worktrees are created under the system temp directory. Set `worktreeBaseDir` in config, or `PI_SUBAGENTS_WORKTREE_DIR` when config is unset, to put them under a stable trusted directory. Missing base directories are created automatically.
 
-After a worktree parallel step completes, per-agent diff stats are appended to the output and full patch files are written to artifacts. Worktrees and temp branches are cleaned up in `finally` blocks.
+After a worktree parallel step completes, per-agent diff stats are appended to the output and full patch files are written to artifacts. The runtime also writes a versioned aggregate handoff manifest: foreground runs use the artifact directory's `handoffs/<run-id>.json`, while async runs use `<async-dir>/handoff.json`. The manifest records each child's terminal status, summary, output/session/structured-output references, patch stats and path, and whether its worktree and temporary branch were actually removed. Foreground `details`, async `status.json` and result files, status output, intercom delivery, and completion notifications expose the manifest path. Worktrees and temp branches still receive best-effort fallback cleanup if handoff finalization cannot run.
 
 ## Configuration
 

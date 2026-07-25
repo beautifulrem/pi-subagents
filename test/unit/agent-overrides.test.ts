@@ -98,6 +98,28 @@ describe("builtin agent overrides", () => {
 		assert.equal(worker.model, "deepseek-v4-pro");
 	});
 
+	it("applies subagents.defaultThinking only when thinking is unset", () => {
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
+			subagents: { defaultThinking: " low " },
+		});
+		writeProjectAgent(tempProject, "project-default", `---\nname: project-default\ndescription: Project agent\n---\n\nUse the default.\n`);
+		writeProjectAgent(tempProject, "explicit-off", `---\nname: explicit-off\ndescription: Explicitly disabled\nthinking: false\n---\n\nStay off.\n`);
+
+		const discovered = discoverAgentsAll(tempProject);
+		assert.equal(discovered.project.find((agent) => agent.name === "project-default")?.thinking, "low");
+		assert.equal(discovered.project.find((agent) => agent.name === "explicit-off")?.thinking, false);
+	});
+
+	it("prefers project subagents.defaultThinking and rejects malformed defaults", () => {
+		fs.mkdirSync(path.join(tempProject, ".pi"), { recursive: true });
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), { subagents: { defaultThinking: "low" } });
+		writeJson(path.join(tempProject, ".pi", "settings.json"), { subagents: { defaultThinking: "high" } });
+
+		assert.equal(discoverAgents(tempProject, "both").agents.find((agent) => agent.name === "delegate")?.thinking, "high");
+		writeJson(path.join(tempProject, ".pi", "settings.json"), { subagents: { defaultThinking: "" } });
+		assert.throws(() => discoverAgents(tempProject, "both"), /invalid 'defaultThinking'/);
+	});
+
 	it("applies subagents.defaultModel to custom agents without a frontmatter model", () => {
 		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
 			subagents: {

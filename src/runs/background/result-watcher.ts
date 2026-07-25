@@ -7,6 +7,7 @@ import {
 	SUBAGENT_ASYNC_COMPLETE_EVENT,
 	type IntercomEventBus,
 	type NestedRunSummary,
+	type ParallelHandoffReference,
 	type SubagentResultIntercomChild,
 	type SubagentState,
 } from "../../shared/types.ts";
@@ -69,6 +70,7 @@ type ResultFileData = CompletionNotification & {
 	nestedChildren?: unknown;
 	asyncDir?: string;
 	intercomTarget?: string;
+	parallelHandoff?: ParallelHandoffReference;
 };
 
 function sanitizeNestedResultChildren(value: unknown, resultPath: string, label: string): NestedRunSummary[] | undefined {
@@ -273,6 +275,7 @@ export function createResultWatcher(
 					children: normalizedChildren,
 					asyncId: data.id,
 					asyncDir: data.asyncDir,
+					...(data.parallelHandoff ? { parallelHandoff: data.parallelHandoff } : {}),
 				}));
 				if (!ownsSession(data.sessionId, epoch)) return;
 				if (!delivered) console.error(`Subagent async grouped result intercom delivery was not acknowledged for '${resultPath}'.`);

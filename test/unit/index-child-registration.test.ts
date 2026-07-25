@@ -19,6 +19,30 @@ function parentToolEnv(): NodeJS.ProcessEnv {
 }
 
 describe("subagent extension child mode", () => {
+	it("renders a single completion handoff path", () => {
+		const script = String.raw`
+			import registerSubagentExtension from "./index.ts";
+			const renderers = new Map();
+			const events = { on() { return () => {}; }, emit() {} };
+			const fakePi = new Proxy({
+				events,
+				registerTool() {}, registerCommand() {}, registerShortcut() {},
+				registerMessageRenderer(type, renderer) { renderers.set(type, renderer); },
+				sendMessage() {}, getSessionName() { return undefined; },
+			}, { get(target, prop) { return prop in target ? target[prop] : () => undefined; } });
+			registerSubagentExtension(fakePi);
+			const renderer = renderers.get("subagent-notify");
+			if (!renderer) throw new Error("subagent-notify renderer not registered");
+			const component = renderer({
+				content: "Background task completed: **worker**\\n\\nDone\\n\\nParallel handoff: /tmp/run/handoff.json",
+			}, { expanded: false }, { fg(_name, text) { return text; }, bold(text) { return text; } });
+			const text = component.render(120).join("\\n");
+			if (!text.includes("Parallel handoff: /tmp/run/handoff.json")) throw new Error("handoff path hidden: " + text);
+		`;
+
+		execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], { cwd: projectRoot, env: parentToolEnv(), stdio: "pipe" });
+	});
+
 	it("collapses tool detail before direct subagent tool execution", () => {
 		const script = String.raw`
 			import registerSubagentExtension from "./index.ts";

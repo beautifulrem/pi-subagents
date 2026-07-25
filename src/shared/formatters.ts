@@ -47,6 +47,7 @@ export function formatModelAttemptUsage(attempts: ModelAttempt[] | undefined): s
 	if (!Array.isArray(attempts)) return "";
 	const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
 	let usageValid = true;
+	let usageComplete = true;
 	let validCount = 0;
 	let failed = 0;
 	const count = (input: unknown): number => {
@@ -63,6 +64,7 @@ export function formatModelAttemptUsage(attempts: ModelAttempt[] | undefined): s
 		if (!attempt || typeof attempt !== "object" || Array.isArray(attempt) || typeof attempt.success !== "boolean") continue;
 		validCount++;
 		if (!attempt.success) failed++;
+		if (attempt.usage === undefined) usageComplete = false;
 		if (attempt.usage !== undefined && (!attempt.usage || typeof attempt.usage !== "object" || Array.isArray(attempt.usage))) usageValid = false;
 		for (const field of ["input", "output", "cacheRead", "cacheWrite", "turns"] as const) {
 			const sum = usage[field] + count(attempt.usage?.[field]);
@@ -75,7 +77,7 @@ export function formatModelAttemptUsage(attempts: ModelAttempt[] | undefined): s
 	}
 	if (validCount === 0) return "";
 	const attemptText = `${validCount} attempt${validCount === 1 ? "" : "s"}${failed ? ` (${failed} failed)` : ""}`;
-	return [usageValid ? formatUsage(usage) : "", attemptText].filter(Boolean).join(" · ");
+	return [usageValid ? formatUsage(usage) : "", usageComplete ? "" : "usage partial", attemptText].filter(Boolean).join(" · ");
 }
 
 /**

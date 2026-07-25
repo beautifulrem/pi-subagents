@@ -52,6 +52,7 @@ import { getPiSpawnCommand } from "../shared/pi-spawn.ts";
 import { createJsonlWriter } from "../../shared/jsonl-writer.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-args.ts";
+import { resolveCurrentSubagentCapabilityCeiling } from "../shared/capability-ceiling.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { readStructuredOutput } from "../shared/structured-output.ts";
 import { readChildToolDiagnosticError } from "../shared/tool-availability.ts";
@@ -215,42 +216,6 @@ async function runSingleAttempt(
 			childIndex: options.index ?? 0,
 		})
 		: undefined;
-	const { args, env: sharedEnv, tempDir, toolDiagnosticPath } = buildPiArgs({
-		baseArgs: ["--mode", "json", "-p"],
-		task,
-		sessionEnabled: shared.sessionEnabled,
-		sessionDir: options.sessionDir,
-		sessionFile: options.sessionFile,
-		model: modelArg,
-		thinking: effectiveThinking,
-		systemPromptMode: agent.systemPromptMode,
-		inheritProjectContext: agent.inheritProjectContext,
-		inheritSkills: agent.inheritSkills,
-		requireReadTool: Boolean(shared.resolvedSkillNames?.length),
-		tools: agent.tools,
-		extensions: agent.extensions,
-		subagentOnlyExtensions: agent.subagentOnlyExtensions,
-		systemPrompt: appendTurnBudgetSystemPrompt(shared.systemPrompt, options.turnBudget),
-		mcpDirectTools: agent.mcpDirectTools,
-		cwd: options.cwd ?? runtimeCwd,
-		promptFileStem: agent.name,
-		intercomSessionName: options.intercomSessionName,
-		orchestratorIntercomTarget: options.orchestratorIntercomTarget,
-		runId: options.runId,
-		childAgentName: agent.name,
-		childIndex: options.index ?? 0,
-		parentEventSink: options.nestedRoute?.eventSink,
-		parentControlInbox: options.nestedRoute?.controlInbox,
-		parentRootRunId: options.nestedRoute?.rootRunId,
-		parentCapabilityToken: options.nestedRoute?.capabilityToken,
-		parentSessionId: options.parentSessionId,
-		structuredOutput: options.structuredOutput,
-		toolBudget: options.toolBudget,
-		allowZeroToolBudget: options.allowZeroToolBudget,
-		childWatchdog,
-		waitToolEnabled: options.waitToolEnabled,
-	});
-
 	const result: SingleResult = withRunContext({
 		agent: agent.name,
 		task: shared.originalTask ?? task,
@@ -266,15 +231,9 @@ async function runSingleAttempt(
 		skillsWarning: shared.skillsWarning,
 		...(options.turnBudget ? { turnBudget: initialTurnBudgetState(options.turnBudget) } : {}),
 		...(options.toolBudget ? { toolBudget: initialToolBudgetState(options.toolBudget) } : {}),
+		...(options.capabilityCeiling ? { capabilityCeiling: options.capabilityCeiling } : {}),
 	}, options.context);
 	const startTime = Date.now();
-	if (options.structuredOutput) {
-		try {
-			if (existsSync(options.structuredOutput.outputPath)) unlinkSync(options.structuredOutput.outputPath);
-		} catch {
-			// Missing/stale structured-output files are handled after the child exits.
-		}
-	}
 	const controlConfig = options.controlConfig ?? DEFAULT_CONTROL_CONFIG;
 	let interruptedByControl = false;
 	const allControlEvents: ControlEvent[] = [];
@@ -304,7 +263,6 @@ async function runSingleAttempt(
 	result.progress = progress;
 	const attemptTimeout = resolveAttemptTimeout(options);
 	if (attemptTimeout?.remainingMs === 0) {
-		cleanupTempDir(tempDir);
 		result.exitCode = 1;
 		result.timedOut = true;
 		result.error = attemptTimeout.message;
@@ -318,8 +276,70 @@ async function runSingleAttempt(
 		};
 		return result;
 	}
+	if (options.signal?.aborted) {
+		result.exitCode = 1;
+		result.error = "Subagent execution cancelled before launch";
+		result.finalOutput = result.error;
+		progress.status = "failed";
+		progress.error = result.error;
+		result.progressSummary = {
+			toolCount: progress.toolCount,
+			tokens: progress.tokens,
+			durationMs: progress.durationMs,
+		};
+		return result;
+	}
+	if (options.structuredOutput) {
+		try {
+			if (existsSync(options.structuredOutput.outputPath)) unlinkSync(options.structuredOutput.outputPath);
+		} catch {
+			// Missing/stale structured-output files are handled after the child exits.
+		}
+	}
+	const { args, env: sharedEnv, tempDir, toolDiagnosticPath, capabilityAudit } = buildPiArgs({
+		baseArgs: ["--mode", "json", "-p"],
+		task,
+		sessionEnabled: shared.sessionEnabled,
+		sessionDir: options.sessionDir,
+		sessionFile: options.sessionFile,
+		model: modelArg,
+		thinking: effectiveThinking,
+		systemPromptMode: agent.systemPromptMode,
+		inheritProjectContext: agent.inheritProjectContext,
+		inheritSkills: agent.inheritSkills,
+		requireReadTool: Boolean(shared.resolvedSkillNames?.length),
+		tools: agent.tools,
+		extensions: agent.extensions,
+		subagentOnlyExtensions: agent.subagentOnlyExtensions,
+		systemPrompt: appendTurnBudgetSystemPrompt(shared.systemPrompt, options.turnBudget, options.turnBudgetOffset),
+		mcpDirectTools: agent.mcpDirectTools,
+		cwd: options.cwd ?? runtimeCwd,
+		promptFileStem: agent.name,
+		intercomSessionName: options.intercomSessionName,
+		orchestratorIntercomTarget: options.orchestratorIntercomTarget,
+		runId: options.runId,
+		childAgentName: agent.name,
+		childIndex: options.index ?? 0,
+		parentEventSink: options.nestedRoute?.eventSink,
+		parentControlInbox: options.nestedRoute?.controlInbox,
+		parentRootRunId: options.nestedRoute?.rootRunId,
+		parentCapabilityToken: options.nestedRoute?.capabilityToken,
+		parentSessionId: options.parentSessionId,
+		structuredOutput: options.structuredOutput,
+		toolBudget: options.toolBudget,
+		toolBudgetOffset: options.toolBudgetOffset,
+		allowZeroToolBudget: options.allowZeroToolBudget,
+		childWatchdog,
+		waitToolEnabled: options.waitToolEnabled,
+		capabilityCeiling: options.capabilityCeiling,
+	});
+	if (capabilityAudit) {
+		result.capabilityCeiling = capabilityAudit.ceiling;
+		result.capabilityAudit = capabilityAudit;
+	}
 	const spawnEnv = { ...process.env, ...sharedEnv, ...getSubagentDepthEnv(options.maxSubagentDepth) };
 	let observedMutationAttempt = false;
+	let usageIncomplete = false;
 
 	const exitCode = await new Promise<number>((resolve) => {
 		const spawnSpec = getPiSpawnCommand(args);
@@ -745,12 +765,13 @@ async function runSingleAttempt(
 				result.messages!.push(evt.message);
 				if (evt.message.role === "assistant") {
 					result.usage.turns++;
-					progress.turnCount = result.usage.turns;
+					const totalTurnCount = (options.turnBudgetOffset ?? 0) + result.usage.turns;
+					progress.turnCount = totalTurnCount;
 					const stopReason = (evt.message as { stopReason?: string }).stopReason;
 					const hasToolCall = Array.isArray(evt.message.content)
 						&& evt.message.content.some((part) => (part as { type?: string }).type === "toolCall");
 					const terminalAssistantStop = stopReason === "stop" && !hasToolCall;
-					updateTurnBudget(result.usage.turns, terminalAssistantStop, hasToolCall || Boolean(progress.currentTool));
+					updateTurnBudget(totalTurnCount, terminalAssistantStop, hasToolCall || Boolean(progress.currentTool));
 					const u = evt.message.usage;
 					if (u) {
 						result.usage.input += u.input || 0;
@@ -759,7 +780,7 @@ async function runSingleAttempt(
 						result.usage.cacheWrite += u.cacheWrite || 0;
 						result.usage.cost += u.cost?.total || 0;
 						progress.tokens = result.usage.input + result.usage.output;
-					}
+					} else usageIncomplete = true;
 					if (!result.model && evt.message.model) result.model = evt.message.model;
 					if (evt.message.errorMessage) assistantError = evt.message.errorMessage;
 					const assistantText = extractTextFromContent(evt.message.content);
@@ -898,8 +919,9 @@ async function runSingleAttempt(
 				closeError = stderr.trim();
 			}
 			const finalCode = forcedDrainAfterFinalSuccess ? 0 : forcedTerminationSignal || signal ? (code ?? 1) : (code ?? 0);
-			if (detached) {
-				const recoveredProgress = snapshotProgress(progress);
+				if (detached) {
+					if (result.usage.turns === 0 || usageIncomplete) result.usageIncomplete = true;
+					const recoveredProgress = snapshotProgress(progress);
 				const recoveredResult = snapshotResult(result, recoveredProgress);
 				if (!recoveredResult.error && closeError) recoveredResult.error = closeError;
 				recoveredResult.exitCode = recoveredResult.error && finalCode === 0 ? 1 : finalCode;
@@ -1005,6 +1027,7 @@ async function runSingleAttempt(
 		}
 	});
 	result.exitCode = exitCode;
+	if (result.usage.turns === 0 || usageIncomplete) result.usageIncomplete = true;
 	if (interruptedByControl) {
 		result.exitCode = 0;
 		result.interrupted = true;
@@ -1191,6 +1214,22 @@ export async function runSync(
 			error: `Unknown agent: ${agentName}`,
 		}, options.context);
 	}
+	if (options.signal?.aborted) {
+		const error = "Subagent execution cancelled before launch";
+		return withRunContext({
+			agent: agentName,
+			task,
+			exitCode: 1,
+			messages: [],
+			usage: emptyUsage(),
+			error,
+			finalOutput: error,
+		}, options.context);
+	}
+	options = {
+		...options,
+		capabilityCeiling: options.capabilityCeiling ?? resolveCurrentSubagentCapabilityCeiling(options.parentSessionId),
+	};
 	const outputModeValidationError = validateFileOnlyOutputMode(options.outputMode, options.outputPath, `Single run (${agentName})`);
 	if (outputModeValidationError) {
 		return withRunContext({
@@ -1262,6 +1301,7 @@ export async function runSync(
 	const attemptNotes: string[] = [];
 	let totalToolCount = 0;
 	let totalDurationMs = 0;
+	let usageIncomplete = false;
 
 	let artifactPathsResult: ArtifactPaths | undefined;
 	let jsonlPath: string | undefined;
@@ -1305,6 +1345,8 @@ export async function runSync(
 			agentContract: target.agentContract,
 			execution: target.execution,
 			acceptance: target.acceptance,
+			capabilityCeiling: target.capabilityCeiling,
+			capabilityAudit: target.capabilityAudit,
 			review: target.review,
 			effects: target.effects,
 			...(transcriptWriter ? { transcriptPath: artifactPathsResult.transcriptPath } : {}),
@@ -1360,7 +1402,11 @@ export async function runSync(
 	for (let i = 0; i < modelsToTry.length; i++) {
 		const candidate = modelsToTry[i];
 		const outputSnapshot = captureSingleOutputSnapshot(options.outputPath);
-		const result = await runSingleAttempt(runtimeCwd, agent, taskWithAcceptance, candidate, detachedAwareOptions, {
+		const result = await runSingleAttempt(runtimeCwd, agent, taskWithAcceptance, candidate, {
+			...detachedAwareOptions,
+			turnBudgetOffset: aggregateUsage.turns,
+			toolBudgetOffset: totalToolCount,
+		}, {
 			sessionEnabled,
 			systemPrompt,
 			resolvedSkillNames: resolvedSkills.length > 0 ? resolvedSkills.map((skill) => skill.name) : undefined,
@@ -1376,6 +1422,7 @@ export async function runSync(
 		if (result.model) attemptedModels.push(result.model);
 		else if (candidate) attemptedModels.push(candidate);
 		sumUsage(aggregateUsage, result.usage);
+		usageIncomplete ||= result.usageIncomplete === true;
 		totalToolCount += result.progressSummary?.toolCount ?? 0;
 		totalDurationMs += result.progressSummary?.durationMs ?? 0;
 		const attemptSucceeded = result.exitCode === 0 && !result.error;
@@ -1384,7 +1431,7 @@ export async function runSync(
 			success: attemptSucceeded,
 			exitCode: result.exitCode,
 			error: result.error,
-			usage: { ...result.usage },
+			...(result.usageIncomplete ? {} : { usage: { ...result.usage } }),
 		};
 		modelAttempts.push(attempt);
 		if (result.detached || result.timedOut || result.turnBudgetExceeded) {
@@ -1409,6 +1456,7 @@ export async function runSync(
 	} satisfies SingleResult, options.context);
 
 	result.usage = aggregateUsage;
+	result.usageIncomplete = usageIncomplete || undefined;
 	result.attemptedModels = attemptedModels.length > 0 ? attemptedModels : undefined;
 	result.modelAttempts = modelAttempts.length > 0 ? modelAttempts : undefined;
 	result.progressSummary = {
@@ -1416,6 +1464,7 @@ export async function runSync(
 		tokens: aggregateUsage.input + aggregateUsage.output,
 		durationMs: totalDurationMs,
 	};
+	if (options.toolBudget) result.toolBudget = toolBudgetState(options.toolBudget, totalToolCount, result.toolBudget?.blockedTool);
 	if (attemptNotes.length > 0 && result.progress) {
 		result.progress.recentOutput = [...attemptNotes, ...result.progress.recentOutput];
 		if (result.progress.recentOutput.length > 50) {

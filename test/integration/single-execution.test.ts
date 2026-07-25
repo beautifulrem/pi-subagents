@@ -43,6 +43,7 @@ import { INTERCOM_DETACH_REQUEST_EVENT, INTERCOM_DETACH_RESPONSE_EVENT, type Sub
 import { CHILD_WATCHDOG_STATUS_EVENT } from "../../src/watchdog/child-status.ts";
 import { WAIT_TOOL_ENABLED_ENV } from "../../src/runs/background/wait-config.ts";
 import { TOOL_BUDGET_ENV, TOOL_BUDGET_ZERO_AUTH_ENV } from "../../src/runs/shared/tool-budget.ts";
+import { registerSubagentCapabilityCeiling } from "../../src/api/capability-ceiling.ts";
 import { MainWatchdogRuntime } from "../../src/watchdog/runtime.ts";
 import { MAX_CHILD_PENDING_LINE_BYTES, MAX_CHILD_STDERR_BYTES } from "../../src/runs/shared/child-protocol.ts";
 import {
@@ -57,6 +58,7 @@ interface ModelAttempt {
 	success?: boolean;
 	exitCode?: number;
 	error?: string;
+	usage?: { input?: number; output?: number; cost?: number };
 }
 
 interface ProgressSummary {
@@ -93,6 +95,7 @@ interface RunSyncResult {
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
 	usage: { turns: number; input: number; output: number };
+	usageIncomplete?: boolean;
 	progress: ProgressSummary;
 	controlEvents?: Array<{ type?: string; message: string; reason?: string; turns?: number; tokens?: number; currentPath?: string; recentFailureSummary?: string }>;
 	artifactPaths?: ArtifactPaths;
@@ -121,6 +124,8 @@ interface RunSyncResult {
 		verifyRuns?: Array<{ status?: string }>;
 		runtimeChecks?: Array<{ id?: string; status?: string; message?: string }>;
 	};
+	capabilityCeiling?: { version: 1; allowedTools?: string[]; denyExtensions: boolean; sources: string[] };
+	capabilityAudit?: { removedTools: string[]; extensionsDenied: boolean };
 }
 
 interface MockPiCallRecord {
@@ -339,6 +344,31 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 
 		const output = getFinalOutput(result.messages);
 		assert.equal(output, "Hello from mock agent");
+	});
+
+	it("applies exact-session capability ceilings before spawning", async () => {
+		mockPi.onCall({ output: "restricted child complete" });
+		const sessionId = `capability-${Date.now()}-${Math.random()}`;
+		const handle = registerSubagentCapabilityCeiling({
+			sessionId,
+			source: "integration-test",
+			ceiling: { allowedTools: ["read"], denyExtensions: true },
+		});
+		try {
+			const result = await runSync(tempDir, [makeAgent("echo", { tools: ["read", "write"], extensions: ["/tmp/untrusted-extension.ts"] })], "echo", "Read only", {
+				runId: "capability-run",
+				parentSessionId: sessionId,
+				sessionFile: path.join(tempDir, "capability-session.jsonl"),
+			});
+
+			assert.equal(result.exitCode, 0);
+			assert.deepEqual(readCallArgs().slice(readCallArgs().indexOf("--tools") + 1, readCallArgs().indexOf("--tools") + 2), ["read"]);
+			assert.deepEqual(result.capabilityAudit?.removedTools, ["write"]);
+			assert.equal(result.capabilityAudit?.extensionsDenied, true);
+			assert.equal(readCallArgs().includes("/tmp/untrusted-extension.ts"), false);
+		} finally {
+			handle.dispose();
+		}
 	});
 
 	it("treats action='single' with execution fields as single execution", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
@@ -1065,6 +1095,39 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.deepEqual(result.details?.totalCost, { inputTokens: 200, outputTokens: 100, costUsd: 0.002 });
 	});
 
+	it("does not launch queued parallel tasks after the parent aborts", async () => {
+		mockPi.onCall({ delay: 10_000 });
+		mockPi.onCall({ output: "must not launch" });
+		const executor = makeExecutor([makeAgent("echo"), makeAgent("second")]);
+		const controller = new AbortController();
+		const run = executor.execute(
+			"parallel-abort",
+			{
+				tasks: [
+					{ agent: "echo", task: "First task" },
+					{ agent: "second", task: "Queued task", outputSchema: { type: "object" } },
+				],
+				concurrency: 1,
+			},
+			controller.signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const deadlineAt = Date.now() + 2_000;
+		while (mockPi.callCount() < 1 && Date.now() < deadlineAt) await new Promise((resolve) => setTimeout(resolve, 10));
+		assert.equal(mockPi.callCount(), 1, "first child should be running before abort");
+		controller.abort();
+
+		const result = await run;
+		assert.equal(mockPi.callCount(), 1, "queued child must not spawn after abort");
+		assert.match(result.details?.results?.[1]?.error ?? "", /cancelled before launch/i);
+		assert.equal(
+			fs.existsSync(path.join(tempDir, ".pi-subagents", "artifacts", "structured-output")),
+			false,
+			"queued child must not create structured-output artifacts after abort",
+		);
+	});
+
 	it("reports total cost for foreground single runs", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		mockPi.onCall({ output: "single result" });
 		const executor = makeExecutor([makeAgent("echo")]);
@@ -1512,6 +1575,148 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.modelAttempts?.[1]?.success, true);
 		assert.equal(result.usage.turns, 2);
 		assert.equal(mockPi.callCount(), 2);
+	});
+
+	it("marks fallback usage partial when an attempt reports no usage", async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "temporary provider failure" }],
+					model: "openai/gpt-5-mini",
+					errorMessage: "rate limit exceeded",
+				},
+			}],
+			exitCode: 1,
+		});
+		mockPi.onCall({ output: "Recovered on fallback" });
+		const agents = [makeAgent("echo", {
+			model: "openai/gpt-5-mini",
+			fallbackModels: ["anthropic/claude-sonnet-4"],
+		})];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", { runId: "fallback-partial-usage" });
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.usageIncomplete, true);
+		assert.equal(result.modelAttempts?.[0]?.usage, undefined);
+		assert.equal(result.modelAttempts?.[1]?.usage?.input, 100);
+	});
+
+	it("marks one attempt partial when any assistant turn omits usage", async () => {
+		mockPi.onCall({
+			jsonl: [
+				{
+					type: "message_end",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "working" }, { type: "toolCall", name: "read", arguments: { path: "README.md" } }],
+						model: "mock/test-model",
+						stopReason: "tool_use",
+						usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+					},
+				},
+				{
+					type: "message_end",
+					message: { role: "assistant", content: [{ type: "text", text: "done without usage" }], model: "mock/test-model", stopReason: "stop" },
+				},
+			],
+		});
+
+		const result = await runSync(tempDir, [makeAgent("echo")], "echo", "Task", { runId: "partial-turn-usage" });
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.usage.turns, 2);
+		assert.equal(result.usageIncomplete, true);
+	});
+
+	it("enforces one turn budget across fallback attempts", async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "temporary provider failure" }],
+					model: "openai/gpt-5-mini",
+					errorMessage: "rate limit exceeded",
+					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+				},
+			}],
+			exitCode: 1,
+		});
+		mockPi.onCall({
+			jsonl: [
+				{
+					type: "message_end",
+					message: {
+						role: "assistant",
+						content: [{ type: "toolCall", name: "read", arguments: { path: "README.md" } }],
+						model: "anthropic/claude-sonnet-4",
+						stopReason: "tool_use",
+						usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+					},
+				},
+				{
+					type: "message_end",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "final output beyond the shared budget" }],
+						model: "anthropic/claude-sonnet-4",
+						stopReason: "stop",
+						usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+					},
+				},
+			],
+		});
+		const agents = [makeAgent("echo", {
+			model: "openai/gpt-5-mini",
+			fallbackModels: ["anthropic/claude-sonnet-4"],
+		})];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "fallback-shared-turn-budget",
+			turnBudget: { maxTurns: 2, graceTurns: 0 },
+		});
+
+		assert.equal(result.exitCode, 1);
+		assert.equal(result.turnBudgetExceeded, true);
+		assert.equal(result.turnBudget?.turnCount, 3);
+		assert.match(result.error ?? "", /exceeded turn budget after 3 assistant turns/);
+	});
+
+	it("carries tool-budget usage into fallback attempts", async () => {
+		mockPi.onCall({
+			jsonl: [
+				events.toolStart("read", { path: "README.md" }),
+				events.toolEnd("read"),
+				events.toolResult("read", "partial"),
+				{
+					type: "message_end",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "temporary provider failure" }],
+						model: "openai/gpt-5-mini",
+						errorMessage: "rate limit exceeded",
+						usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+					},
+				},
+			],
+			exitCode: 1,
+		});
+		mockPi.onCall({ echoEnv: ["PI_SUBAGENT_TOOL_BUDGET_OFFSET"] });
+		const agents = [makeAgent("echo", {
+			model: "openai/gpt-5-mini",
+			fallbackModels: ["anthropic/claude-sonnet-4"],
+		})];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "fallback-shared-tool-budget",
+			toolBudget: { hard: 2, block: ["read"] },
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(JSON.parse(result.finalOutput ?? "{}").PI_SUBAGENT_TOOL_BUDGET_OFFSET, "1");
 	});
 
 	it("retries with fallback models when provider errors exit zero", async () => {

@@ -27,8 +27,23 @@ const STALE_EMPTY_CHANNEL_CLEANUP_INTERVAL_MS = 60 * 1000;
 
 type SupervisorReason = "need_decision" | "interview_request" | "progress_update";
 
+interface ChildEndpoint {
+	kind: "child";
+	runId: string;
+	agent: string;
+	childIndex: number;
+	target?: string;
+}
+
+interface SupervisorEndpoint {
+	kind: "supervisor";
+	sessionId: string;
+	target?: string;
+}
+
 interface SupervisorRequest {
 	type: "subagent.supervisor.request";
+	protocolVersion?: 1;
 	id: string;
 	createdAt: number;
 	expiresAt?: number;
@@ -36,11 +51,13 @@ interface SupervisorRequest {
 	message: string;
 	expectsReply: boolean;
 	orchestratorTarget?: string;
-	orchestratorSessionId?: string;
+	orchestratorSessionId: string;
 	runId: string;
 	agent: string;
 	childIndex: number;
 	childTarget?: string;
+	sender?: ChildEndpoint;
+	receiver?: SupervisorEndpoint;
 	interview?: unknown;
 }
 
@@ -51,9 +68,12 @@ interface PendingSupervisorRequest extends SupervisorRequest {
 
 interface SupervisorReply {
 	type: "subagent.supervisor.reply";
+	protocolVersion?: 1;
 	requestId: string;
 	createdAt: number;
 	message: string;
+	sender?: SupervisorEndpoint;
+	receiver?: ChildEndpoint;
 }
 
 interface ContactSupervisorParams {
@@ -206,14 +226,40 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
 	});
 }
 
-async function waitForReply(channelDir: string, requestId: string, deadline: number, signal?: AbortSignal): Promise<SupervisorReply> {
-	const file = replyPath(channelDir, requestId);
+function endpointTargetMatches(actual: unknown, expected: string | undefined): boolean {
+	return actual === expected;
+}
+
+function parseSupervisorReply(raw: unknown, metadata: NonNullable<ReturnType<typeof readChildMetadata>>, requestId: string): SupervisorReply | undefined {
+	if (!raw || typeof raw !== "object") return undefined;
+	const parsed = raw as Partial<SupervisorReply>;
+	if (parsed.type !== "subagent.supervisor.reply" || parsed.requestId !== requestId || typeof parsed.message !== "string") return undefined;
+	if (parsed.protocolVersion === undefined) return parsed as SupervisorReply;
+	if (parsed.protocolVersion !== 1) throw new Error(`Unsupported supervisor reply protocol version: ${String(parsed.protocolVersion)}.`);
+	const sender = parsed.sender;
+	const receiver = parsed.receiver;
+	if (
+		sender?.kind !== "supervisor"
+		|| sender.sessionId !== metadata.orchestratorSessionId
+		|| !endpointTargetMatches(sender.target, metadata.orchestratorTarget)
+		|| receiver?.kind !== "child"
+		|| receiver.runId !== metadata.runId
+		|| receiver.agent !== metadata.agent
+		|| receiver.childIndex !== metadata.childIndex
+		|| !endpointTargetMatches(receiver.target, metadata.childTarget)
+	) throw new Error("Supervisor reply identity does not match the waiting child.");
+	return parsed as SupervisorReply;
+}
+
+async function waitForReply(metadata: NonNullable<ReturnType<typeof readChildMetadata>>, requestId: string, deadline: number, signal?: AbortSignal): Promise<SupervisorReply> {
+	const file = replyPath(metadata.channelDir, requestId);
 	while (Date.now() <= deadline) {
 		if (signal?.aborted) throw new Error("Supervisor request cancelled.");
 		if (fs.existsSync(file)) {
-			const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as Partial<SupervisorReply>;
-			if (parsed.type === "subagent.supervisor.reply" && parsed.requestId === requestId && typeof parsed.message === "string") {
-				return parsed as SupervisorReply;
+			const parsed = parseSupervisorReply(JSON.parse(fs.readFileSync(file, "utf-8")), metadata, requestId);
+			if (parsed) {
+				removeChannelFile(file);
+				return parsed;
 			}
 		}
 		await delay(250, signal);
@@ -236,6 +282,7 @@ async function sendSupervisorRequest(params: ContactSupervisorParams, signal?: A
 	const message = formatChildMessage({ ...metadata, reason: params.reason, message: params.message, interview: params.interview });
 	const request: SupervisorRequest = {
 		type: "subagent.supervisor.request",
+		protocolVersion: 1,
 		id: requestId,
 		createdAt,
 		...(expiresAt !== undefined ? { expiresAt } : {}),
@@ -243,11 +290,23 @@ async function sendSupervisorRequest(params: ContactSupervisorParams, signal?: A
 		message,
 		expectsReply,
 		...(metadata.orchestratorTarget ? { orchestratorTarget: metadata.orchestratorTarget } : {}),
-		...(metadata.orchestratorSessionId ? { orchestratorSessionId: metadata.orchestratorSessionId } : {}),
+		orchestratorSessionId: metadata.orchestratorSessionId,
 		runId: metadata.runId,
 		agent: metadata.agent,
 		childIndex: metadata.childIndex,
 		...(metadata.childTarget ? { childTarget: metadata.childTarget } : {}),
+		sender: {
+			kind: "child",
+			runId: metadata.runId,
+			agent: metadata.agent,
+			childIndex: metadata.childIndex,
+			...(metadata.childTarget ? { target: metadata.childTarget } : {}),
+		},
+		receiver: {
+			kind: "supervisor",
+			sessionId: metadata.orchestratorSessionId,
+			...(metadata.orchestratorTarget ? { target: metadata.orchestratorTarget } : {}),
+		},
 		...(params.interview !== undefined ? { interview: params.interview } : {}),
 	};
 	const serialized = JSON.stringify(request, null, "\t");
@@ -262,7 +321,8 @@ async function sendSupervisorRequest(params: ContactSupervisorParams, signal?: A
 	}
 
 	try {
-		const reply = await waitForReply(metadata.channelDir, requestId, replyDeadline, signal);
+		const reply = await waitForReply(metadata, requestId, replyDeadline, signal);
+		removeChannelFile(requestPath(metadata.channelDir, requestId));
 		const details: Record<string, unknown> = { requestId, reason: params.reason };
 		if (params.reason === "interview_request") {
 			const structured = parseStructuredReply(reply.message);
@@ -274,7 +334,8 @@ async function sendSupervisorRequest(params: ContactSupervisorParams, signal?: A
 			details,
 		};
 	} catch (error) {
-		removeRequestFile(requestPath(metadata.channelDir, requestId));
+		removeChannelFile(requestPath(metadata.channelDir, requestId));
+		removeChannelFile(replyPath(metadata.channelDir, requestId));
 		throw error;
 	}
 }
@@ -328,7 +389,21 @@ function parseRequestFile(file: string, channelDir: string): PendingSupervisorRe
 		if (typeof parsed.id !== "string" || !parsed.id) return undefined;
 		if (parsed.reason !== "need_decision" && parsed.reason !== "interview_request" && parsed.reason !== "progress_update") return undefined;
 		if (typeof parsed.message !== "string" || !parsed.message) return undefined;
+		if (typeof parsed.orchestratorSessionId !== "string" || !parsed.orchestratorSessionId) return undefined;
 		if (typeof parsed.runId !== "string" || typeof parsed.agent !== "string" || typeof parsed.childIndex !== "number") return undefined;
+		if (parsed.protocolVersion !== undefined) {
+			if (parsed.protocolVersion !== 1) return undefined;
+			if (
+				parsed.sender?.kind !== "child"
+				|| parsed.sender.runId !== parsed.runId
+				|| parsed.sender.agent !== parsed.agent
+				|| parsed.sender.childIndex !== parsed.childIndex
+				|| !endpointTargetMatches(parsed.sender.target, parsed.childTarget)
+				|| parsed.receiver?.kind !== "supervisor"
+				|| parsed.receiver.sessionId !== parsed.orchestratorSessionId
+				|| !endpointTargetMatches(parsed.receiver.target, parsed.orchestratorTarget)
+			) return undefined;
+		}
 		return { ...parsed as SupervisorRequest, channelDir, requestFile: file };
 	} catch {
 		return undefined;
@@ -484,11 +559,11 @@ function clearForegroundSupervisorAttention(request: SupervisorRequest, pending:
 	remembered.child.updatedAt = updatedAt;
 }
 
-function removeRequestFile(file: string): void {
+function removeChannelFile(file: string): void {
 	try {
 		fs.rmSync(file, { force: true });
 	} catch {
-		// Request cleanup is best-effort; reply files and timeout errors remain authoritative.
+		// Channel cleanup is best-effort; lifecycle state and timeout errors remain authoritative.
 	}
 }
 
@@ -507,9 +582,9 @@ function requestRunInactive(request: SupervisorRequest, state: SubagentState): b
 
 	const asyncJob = state.asyncJobs.get(request.runId);
 	if (!asyncJob) return false;
-	if (asyncJob.status === "complete" || asyncJob.status === "failed" || asyncJob.status === "paused") return true;
+	if (asyncJob.status === "complete" || asyncJob.status === "failed" || asyncJob.status === "paused" || asyncJob.status === "stopped") return true;
 	const stepStatus = asyncJob.steps?.[request.childIndex]?.status;
-	return stepStatus === "complete" || stepStatus === "completed" || stepStatus === "failed" || stepStatus === "paused";
+	return stepStatus === "complete" || stepStatus === "completed" || stepStatus === "failed" || stepStatus === "paused" || stepStatus === "stopped";
 }
 
 function requestLifecycle(request: PendingSupervisorRequest, state: SubagentState, ctx: ExtensionContext | undefined, now: number): SupervisorRequestLifecycle {
@@ -522,7 +597,7 @@ function requestLifecycle(request: PendingSupervisorRequest, state: SubagentStat
 }
 
 function cleanupRequestLifecycle(request: PendingSupervisorRequest, lifecycle: SupervisorRequestLifecycle): void {
-	if (lifecycle === "resolved" || lifecycle === "expired" || lifecycle === "inactive") removeRequestFile(request.requestFile);
+	if (lifecycle === "resolved" || lifecycle === "expired" || lifecycle === "inactive") removeChannelFile(request.requestFile);
 }
 
 function refreshPendingRequests(pending: Map<string, PendingSupervisorRequest>, state: SubagentState, ctx: ExtensionContext | undefined): void {
@@ -552,12 +627,26 @@ function writeReply(request: PendingSupervisorRequest, message: string): void {
 	if (!message.trim()) throw new Error("message is required for supervisor replies.");
 	const reply: SupervisorReply = {
 		type: "subagent.supervisor.reply",
+		protocolVersion: 1,
 		requestId: request.id,
 		createdAt: Date.now(),
 		message: message.trim(),
+		sender: {
+			kind: "supervisor",
+			sessionId: request.orchestratorSessionId,
+			...(request.orchestratorTarget ? { target: request.orchestratorTarget } : {}),
+		},
+		receiver: {
+			kind: "child",
+			runId: request.runId,
+			agent: request.agent,
+			childIndex: request.childIndex,
+			...(request.childTarget ? { target: request.childTarget } : {}),
+		},
 	};
+	if (Buffer.byteLength(JSON.stringify(reply, null, 2), "utf-8") > MAX_MESSAGE_BYTES) throw new Error("Supervisor reply is too large.");
 	writeAtomicJson(replyPath(request.channelDir, request.id), reply);
-	removeRequestFile(request.requestFile);
+	removeChannelFile(request.requestFile);
 }
 
 function resolvePendingRequest(pending: Map<string, PendingSupervisorRequest>, params: IntercomParams): PendingSupervisorRequest {
@@ -670,7 +759,7 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 				markForegroundSupervisorAttention(request, state);
 			}
 			else {
-				removeRequestFile(request.requestFile);
+				removeChannelFile(request.requestFile);
 			}
 			pi.sendMessage({
 				customType: "subagent_supervisor_request",

@@ -3,7 +3,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -41,22 +41,26 @@ import {
 	type ResolvedControlConfig,
 	type ResolvedTurnBudget,
 	type ResolvedToolBudget,
+	type AsyncStatus,
 	type SubagentRunMode,
 	type SteeringRecoveryDescriptor,
 	ASYNC_DIR,
 	RESULTS_DIR,
 	SUBAGENT_ASYNC_STARTED_EVENT,
+	SUBAGENT_PROCESS_TERMINAL_EVENT,
 	SUBAGENT_CONTROL_EVENT_CAPABILITY_ENV,
 	SUBAGENT_LIFECYCLE_ARTIFACT_VERSION,
 	TEMP_ROOT_DIR,
 	getAsyncConfigPath,
 	resolveChildMaxSubagentDepth,
 } from "../../shared/types.ts";
-import { nestedResultsPath, resolveInheritedNestedRouteFromEnv, resolveNestedParentAddressFromEnv, writeNestedEvent } from "../shared/nested-events.ts";
+import { nestedResultsPath, nestedSummaryFromAsyncStatus, resolveInheritedNestedRouteFromEnv, resolveNestedParentAddressFromEnv, writeNestedEvent } from "../shared/nested-events.ts";
 import { initialTurnBudgetState } from "../shared/turn-budget.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
 import type { ImportedAsyncRoot } from "./chain-root-attachment.ts";
 import type { SessionLeaseRequest } from "../shared/session-lease.ts";
+import { intersectSubagentCapabilityCeilings, resolveCurrentSubagentCapabilityCeiling, type ResolvedSubagentCapabilityCeiling } from "../shared/capability-ceiling.ts";
+import { finalizeProcessTerminal, readProcessTerminal } from "./process-terminal.ts";
 
 const require = createRequire(import.meta.url);
 const piPackageRoot = resolvePiPackageRoot();
@@ -160,6 +164,7 @@ interface AsyncChainParams {
 	configToolBudget?: ResolvedToolBudget;
 	/** Global cap on simultaneously-running subagent tasks within the async run. */
 	globalConcurrencyLimit?: number;
+	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
 }
 
 interface AsyncSingleParams {
@@ -203,6 +208,7 @@ interface AsyncSingleParams {
 	turnBudget?: ResolvedTurnBudget;
 	toolBudget?: ResolvedToolBudget;
 	configToolBudget?: ResolvedToolBudget;
+	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
 }
 
 interface AsyncExecutionResult {
@@ -235,6 +241,7 @@ export interface AsyncRunnerStepBuildParams {
 	validateOutputBindings?: boolean;
 	toolBudget?: ResolvedToolBudget;
 	configToolBudget?: ResolvedToolBudget;
+	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
 }
 
 export type AsyncRunnerStepBuildResult =
@@ -289,6 +296,17 @@ function resolveAsyncRunnerNodeCommand(): string {
 		return process.execPath;
 	}
 	return process.platform === "win32" ? "node.exe" : "node";
+}
+
+export function readNestedTerminalStatus(asyncDir: string, runId: string, processTerminal: NonNullable<AsyncStatus["processTerminal"]>): AsyncStatus | undefined {
+	try {
+		const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatus;
+		if (status.runId !== runId || !["single", "parallel", "chain"].includes(status.mode) || !["complete", "failed", "paused", "stopped"].includes(status.state)) return undefined;
+		status.processTerminal = processTerminal;
+		return status;
+	} catch {
+		return undefined;
+	}
 }
 
 export function resolveAsyncRunnerLogPaths(cfg: object): { stdoutPath: string; stderrPath: string } | undefined {
@@ -400,7 +418,7 @@ function terminateRunnerBeforeProceed(pid: number): void {
 	}
 }
 
-function spawnRunner(cfg: object, suffix: string, cwd: string): { pid?: number; controlEventCapability?: string; error?: string } {
+function spawnRunner(cfg: object, suffix: string, cwd: string, onProcessTerminal?: (proof: unknown) => void): { pid?: number; controlEventCapability?: string; error?: string } {
 	if (!jitiCliPath) {
 		return { error: "upstream jiti for TypeScript execution could not be found; ensure package dependencies are installed" };
 	}
@@ -416,12 +434,14 @@ function spawnRunner(cfg: object, suffix: string, cwd: string): { pid?: number; 
 
 	ensureArtifactsDir(TEMP_ROOT_DIR);
 	const cfgPath = getAsyncConfigPath(suffix);
-	writePrivateAtomicJson(cfgPath, cfg);
+	const runnerProcessInstanceId = randomUUID();
+	const launchConfig = { ...cfg, runnerProcessInstanceId };
+	writePrivateAtomicJson(cfgPath, launchConfig);
 	const runner = path.join(path.dirname(fileURLToPath(import.meta.url)), "subagent-runner.ts");
 	const nodeCommand = resolveAsyncRunnerNodeCommand();
-	const startupPath = typeof (cfg as { revivalLease?: unknown; asyncDir?: unknown }).revivalLease === "object"
-		&& typeof (cfg as { asyncDir?: unknown }).asyncDir === "string"
-		? path.join((cfg as { asyncDir: string }).asyncDir, "runner-startup.json")
+	const startupPath = typeof (launchConfig as { revivalLease?: unknown; asyncDir?: unknown }).revivalLease === "object"
+		&& typeof (launchConfig as { asyncDir?: unknown }).asyncDir === "string"
+		? path.join((launchConfig as { asyncDir: string }).asyncDir, "runner-startup.json")
 		: undefined;
 	const startupAckPath = startupPath ? path.join(path.dirname(startupPath), "runner-startup-ack.json") : undefined;
 	const startupProceedPath = startupPath ? path.join(path.dirname(startupPath), "runner-startup-proceed.json") : undefined;
@@ -429,7 +449,7 @@ function spawnRunner(cfg: object, suffix: string, cwd: string): { pid?: number; 
 	if (startupAckPath) fs.rmSync(startupAckPath, { force: true });
 	if (startupProceedPath) fs.rmSync(startupProceedPath, { force: true });
 
-	const logPaths = resolveAsyncRunnerLogPaths(cfg);
+	const logPaths = resolveAsyncRunnerLogPaths(launchConfig);
 	const controlEventCapability = randomBytes(32).toString("base64url");
 	let stdoutFd: number | undefined;
 	let stderrFd: number | undefined;
@@ -454,6 +474,39 @@ function spawnRunner(cfg: object, suffix: string, cwd: string): { pid?: number; 
 		closeFd(stderrFd);
 		proc.on("error", (error) => {
 			console.error(`[pi-subagents] async spawn failed: ${error.message}`);
+		});
+		proc.once("close", (exitCode, signal) => {
+			const launch = launchConfig as { asyncDir?: unknown; id?: unknown; nestedRoute?: NestedRouteInfo; nestedSelf?: { parentRunId: string; parentStepIndex?: number; depth: number; path?: Array<{ runId: string; stepIndex?: number; agent?: string }> } };
+			const asyncDir = launch.asyncDir;
+			const runId = launch.id;
+			if (typeof asyncDir !== "string" || typeof runId !== "string") return;
+			finalizeProcessTerminal(asyncDir, runId, { processInstanceId: runnerProcessInstanceId, closeObservedAt: Date.now(), exitCode, signal });
+			const persisted = readProcessTerminal(asyncDir, { runId, runnerProcessInstanceId });
+			if (!persisted) return;
+			if (launch.nestedRoute && launch.nestedSelf) {
+				try {
+					const status = readNestedTerminalStatus(asyncDir, runId, persisted);
+					if (!status) console.error(`Skipped final nested status because '${path.join(asyncDir, "status.json")}' is unavailable or does not match run '${runId}'.`);
+					else writeNestedEvent(launch.nestedRoute, {
+						type: "subagent.nested.completed",
+						ts: Date.now(),
+						parentRunId: launch.nestedSelf.parentRunId,
+						parentStepIndex: launch.nestedSelf.parentStepIndex,
+						child: nestedSummaryFromAsyncStatus(status, asyncDir, {
+							id: runId,
+							parentRunId: launch.nestedSelf.parentRunId,
+							parentStepIndex: launch.nestedSelf.parentStepIndex,
+							depth: launch.nestedSelf.depth,
+							path: launch.nestedSelf.path,
+							mode: status.mode,
+							ts: Date.now(),
+						}),
+					});
+				} catch (error) {
+					console.error("Failed to emit final nested process-terminal status:", error);
+				}
+			}
+			onProcessTerminal?.(persisted);
 		});
 		if (typeof proc.pid !== "number") {
 			return { error: `async runner did not produce a pid for cwd: ${cwd}` };
@@ -642,6 +695,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 		const agentContract = s.agentContract ?? params.agentContract;
 		return {
 			parentSessionId: ctx.parentSessionId ?? ctx.currentSessionId,
+			...(params.capabilityCeiling ? { capabilityCeiling: params.capabilityCeiling } : {}),
 			agent: s.agent,
 			task,
 			...(params.contextForAgent ? { context: params.contextForAgent(s.agent) } : {}),
@@ -839,6 +893,7 @@ export function executeAsyncChain(
 		nestedRoute,
 	} = params;
 	const resultMode = params.resultMode ?? "chain";
+	const capabilityCeiling = intersectSubagentCapabilityCeilings(params.capabilityCeiling, resolveCurrentSubagentCapabilityCeiling(ctx.parentSessionId ?? ctx.currentSessionId));
 	const inheritedNestedRoute = resolveInheritedNestedRouteFromEnv();
 	const nestedAddress = inheritedNestedRoute ? resolveNestedParentAddressFromEnv() : undefined;
 	const asyncDir = inheritedNestedRoute
@@ -878,6 +933,7 @@ export function executeAsyncChain(
 		asyncDir,
 		toolBudget: params.toolBudget,
 		configToolBudget: params.configToolBudget,
+		capabilityCeiling,
 	});
 	if ("error" in built) {
 		try {
@@ -922,6 +978,7 @@ export function executeAsyncChain(
 				sessionDir: sessionRoot ? path.join(sessionRoot, `async-${id}`) : undefined,
 				asyncDir,
 				sessionId: ctx.currentSessionId,
+				...(capabilityCeiling ? { capabilityCeiling } : {}),
 				piPackageRoot,
 				piArgv1: process.argv[1],
 				worktreeSetupHook,
@@ -948,6 +1005,7 @@ export function executeAsyncChain(
 			},
 			id,
 			runnerCwd,
+			(proof) => ctx.pi.events.emit(SUBAGENT_PROCESS_TERMINAL_EVENT, proof),
 		);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
@@ -1017,6 +1075,7 @@ export function executeAsyncChain(
 						parallelGroups,
 						...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}),
 						...(initialTurnBudget ? { turnBudget: initialTurnBudget } : {}),
+						...(capabilityCeiling ? { capabilityCeiling } : {}),
 						startedAt: now,
 						lastUpdate: now,
 					},
@@ -1046,6 +1105,7 @@ export function executeAsyncChain(
 			asyncDir,
 			...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}),
 			...(initialTurnBudget ? { turnBudget: initialTurnBudget } : {}),
+			...(capabilityCeiling ? { capabilityCeiling } : {}),
 			nestedRoute,
 		});
 	}
@@ -1058,7 +1118,7 @@ export function executeAsyncChain(
 
 	return {
 		content: [{ type: "text", text: formatAsyncStartedMessage(`Async ${resultMode}: ${chainDesc} [${id}]`, ctx.interactive === true) }],
-		details: { mode: resultMode, runId: id, results: [], asyncId: id, asyncDir, workflowGraph, ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}), ...(params.turnBudget ? { turnBudget: params.turnBudget } : {}), ...(params.toolBudget ? { toolBudget: params.toolBudget } : {}) },
+		details: { mode: resultMode, runId: id, results: [], asyncId: id, asyncDir, workflowGraph, ...(capabilityCeiling ? { capabilityCeiling } : {}), ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}), ...(params.turnBudget ? { turnBudget: params.turnBudget } : {}), ...(params.toolBudget ? { toolBudget: params.toolBudget } : {}) },
 	};
 }
 
@@ -1090,6 +1150,7 @@ export function executeAsyncSingle(
 		nestedRoute,
 	} = params;
 	const task = params.task ?? "";
+	const capabilityCeiling = intersectSubagentCapabilityCeilings(params.capabilityCeiling, resolveCurrentSubagentCapabilityCeiling(ctx.parentSessionId ?? ctx.currentSessionId));
 	const runnerCwd = resolveChildCwd(ctx.cwd, cwd);
 	const skillNames = params.skills ?? agentConfig.skills ?? [];
 	const availableModels = params.availableModels;
@@ -1195,6 +1256,7 @@ export function executeAsyncSingle(
 		...(deadlineAt !== undefined ? { absoluteDeadlineAt: deadlineAt } : {}),
 		...(params.turnBudget ? { initialTurnBudget: params.turnBudget } : {}),
 		...(resolvedToolBudget.budget ? { initialToolBudget: resolvedToolBudget.budget } : {}),
+		...(capabilityCeiling ? { capabilityCeiling } : {}),
 		maxSubagentDepth: resolveChildMaxSubagentDepth(maxSubagentDepth, agentConfig.maxSubagentDepth),
 		...(maxOutput ? { maxOutput } : {}),
 		share: shareEnabled,
@@ -1215,6 +1277,7 @@ export function executeAsyncSingle(
 				steps: [
 					{
 						parentSessionId: ctx.parentSessionId ?? ctx.currentSessionId,
+						...(capabilityCeiling ? { capabilityCeiling } : {}),
 						agent,
 						task: taskWithOutputInstruction,
 						...(params.context ? { context: params.context } : {}),
@@ -1256,6 +1319,7 @@ export function executeAsyncSingle(
 				sessionDir: resolvedSessionDir,
 				asyncDir,
 				sessionId: ctx.currentSessionId,
+				...(capabilityCeiling ? { capabilityCeiling } : {}),
 				piPackageRoot,
 				piArgv1: process.argv[1],
 				worktreeSetupHook,
@@ -1280,6 +1344,7 @@ export function executeAsyncSingle(
 			},
 			id,
 			runnerCwd,
+			(proof) => ctx.pi.events.emit(SUBAGENT_PROCESS_TERMINAL_EVENT, proof),
 		);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
@@ -1318,6 +1383,7 @@ export function executeAsyncSingle(
 						chainStepCount: 1,
 						...(timeoutMs !== undefined ? { timeoutMs, deadlineAt } : {}),
 						...(initialTurnBudget ? { turnBudget: initialTurnBudget } : {}),
+						...(capabilityCeiling ? { capabilityCeiling } : {}),
 						startedAt: now,
 						lastUpdate: now,
 					},
@@ -1340,12 +1406,13 @@ export function executeAsyncSingle(
 			asyncDir,
 			...(timeoutMs !== undefined ? { timeoutMs, deadlineAt } : {}),
 			...(initialTurnBudget ? { turnBudget: initialTurnBudget } : {}),
+			...(capabilityCeiling ? { capabilityCeiling } : {}),
 			nestedRoute,
 		});
 	}
 
 	return {
 		content: [{ type: "text", text: formatAsyncStartedMessage(`Async: ${agent} [${id}]`, ctx.interactive === true) }],
-		details: { mode: "single", runId: id, results: [], asyncId: id, asyncDir, ...(params.context ? { context: params.context } : {}), ...(timeoutMs !== undefined ? { timeoutMs, deadlineAt } : {}), ...(params.turnBudget ? { turnBudget: params.turnBudget } : {}), ...(params.toolBudget ? { toolBudget: params.toolBudget } : {}) },
+		details: { mode: "single", runId: id, results: [], asyncId: id, asyncDir, ...(params.context ? { context: params.context } : {}), ...(capabilityCeiling ? { capabilityCeiling } : {}), ...(timeoutMs !== undefined ? { timeoutMs, deadlineAt } : {}), ...(params.turnBudget ? { turnBudget: params.turnBudget } : {}), ...(params.toolBudget ? { toolBudget: params.toolBudget } : {}) },
 	};
 }

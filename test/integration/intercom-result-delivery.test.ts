@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { ASYNC_DIR, INTERCOM_DETACH_REQUEST_EVENT, RESULTS_DIR, SUBAGENT_ASYNC_STARTED_EVENT, SUBAGENT_FOREGROUND_COMPLETE_EVENT } from "../../src/shared/types.ts";
@@ -76,31 +75,15 @@ function createRecordingEventBus(options: { acknowledgeResults?: boolean } = {})
 
 describe("intercom result delivery cutover", { skip: !available ? "executor not importable" : undefined }, () => {
 	let tempDir: string;
-	let homeDir: string;
 	let mockPi: MockPi;
-	let originalHome: string | undefined;
-	let originalUserProfile: string | undefined;
 
 	before(() => {
-		originalHome = process.env.HOME;
-		originalUserProfile = process.env.USERPROFILE;
-		homeDir = createTempDir("pi-subagent-intercom-home-");
-		process.env.HOME = homeDir;
-		process.env.USERPROFILE = homeDir;
 		mockPi = createMockPi();
 		mockPi.install();
-		fs.mkdirSync(path.join(os.homedir(), ".pi", "agent", "extensions", "pi-intercom"), { recursive: true });
-		fs.mkdirSync(path.join(os.homedir(), ".pi", "agent", "intercom"), { recursive: true });
-		fs.writeFileSync(path.join(os.homedir(), ".pi", "agent", "intercom", "config.json"), JSON.stringify({ enabled: true }), "utf-8");
 	});
 
 	after(() => {
 		mockPi.uninstall();
-		if (originalHome === undefined) delete process.env.HOME;
-		else process.env.HOME = originalHome;
-		if (originalUserProfile === undefined) delete process.env.USERPROFILE;
-		else process.env.USERPROFILE = originalUserProfile;
-		removeTempDir(homeDir);
 	});
 
 	beforeEach(() => {

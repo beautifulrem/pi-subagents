@@ -22,6 +22,12 @@ describe("sumResultsUsage", () => {
 
 		assert.deepEqual(total, { input: 30, output: 12, cacheRead: 4, cacheWrite: 6, cost: 0.04, turns: 3 });
 	});
+
+	it("omits aggregate usage when any child usage is incomplete", () => {
+		const partial = resultWithUsage({ input: 20, output: 7, cacheRead: 0, cacheWrite: 0, cost: 0.03, turns: 1 });
+		partial.usageIncomplete = true;
+		assert.equal(sumResultsUsage([partial]), undefined);
+	});
 });
 
 describe("sumResultsCost", () => {
@@ -41,6 +47,12 @@ describe("sumResultsCost", () => {
 			]),
 			{ inputTokens: 0, outputTokens: 0, costUsd: 0 },
 		);
+	});
+
+	it("does not report an exact total when any child usage is incomplete", () => {
+		const partial = resultWithUsage({ input: 20, output: 7, cacheRead: 0, cacheWrite: 0, cost: 0.03, turns: 1 });
+		partial.usageIncomplete = true;
+		assert.equal(sumResultsCost([partial]), undefined);
 	});
 
 	it("includes attached nested subagent costs", () => {

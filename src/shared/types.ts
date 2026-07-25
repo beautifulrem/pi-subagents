@@ -9,6 +9,7 @@ import type { AgentConfig } from "../agents/agents.ts";
 import type { FSWatcher } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ModelScopeConfig } from "../runs/shared/model-scope.ts";
+import type { ResolvedSubagentCapabilityCeiling, SubagentCapabilityAudit } from "../runs/shared/capability-ceiling.ts";
 
 // ============================================================================
 // Basic Types
@@ -216,6 +217,72 @@ export interface ControlEvent {
 export type SubagentResultStatus = "completed" | "failed" | "paused" | "stopped" | "detached";
 export type SubagentRunMode = "single" | "parallel" | "chain";
 
+export interface ParallelHandoffPatch {
+	path: string;
+	branch: string;
+	changed: boolean;
+	diffStat: string;
+	filesChanged: number;
+	insertions: number;
+	deletions: number;
+	error?: string;
+}
+
+export interface ParallelHandoffChild {
+	index: number;
+	taskIndex: number;
+	agent: string;
+	status: SubagentResultStatus;
+	summary: string;
+	outputPath?: string;
+	structuredOutput?: unknown;
+	structuredOutputPath?: string;
+	sessionPath?: string;
+	patch: ParallelHandoffPatch;
+}
+
+export interface ParallelHandoffCleanupTask {
+	index: number;
+	path: string;
+	branch: string;
+	worktreeRemoved: boolean;
+	branchRemoved: boolean;
+	errors?: string[];
+}
+
+export interface ParallelHandoffGroup {
+	stepIndex: number;
+	baseCommit: string;
+	repoRoot: string;
+	children: ParallelHandoffChild[];
+	cleanup: {
+		state: "complete" | "partial";
+		tasks: ParallelHandoffCleanupTask[];
+		pruned: boolean;
+		errors?: string[];
+	};
+}
+
+export interface ParallelHandoffManifest {
+	version: 1;
+	runId: string;
+	mode: "parallel" | "chain";
+	source: "foreground" | "async";
+	cwd: string;
+	createdAt: number;
+	updatedAt: number;
+	groups: ParallelHandoffGroup[];
+}
+
+export interface ParallelHandoffReference {
+	version: 1;
+	path: string;
+	groupCount: number;
+	childCount: number;
+	changedPatches: number;
+	cleanupState: "complete" | "partial";
+}
+
 export interface AgentContract {
 	version: 1;
 }
@@ -251,8 +318,50 @@ export interface EffectsProjection {
 	fileMutation?: FileMutationEffect;
 }
 
-export const SUBAGENT_LIFECYCLE_ARTIFACT_VERSION = 2;
+export const SUBAGENT_LIFECYCLE_ARTIFACT_VERSION = 3;
 export type SubagentLifecycleArtifactVersion = typeof SUBAGENT_LIFECYCLE_ARTIFACT_VERSION;
+
+export type ProcessTerminalState = "pending" | "observed" | "unknown" | "not-started";
+export type ProcessTerminalReason =
+	| "observer-unavailable"
+	| "runner-candidate-missing"
+	| "runner-instance-mismatch"
+	| "writer-close-unverified"
+	| "canonical-session-unavailable"
+	| "canonical-session-lease-active"
+	| "canonical-session-release-unverified"
+	| "proof-write-failed"
+	| "stale-repair";
+
+export interface ProcessInstanceExitV1 {
+	processInstanceId: string;
+	kind: "runner" | "pi-writer";
+	attempt?: number;
+	closeObservedAt: number;
+	exitCode: number | null;
+	signal: string | null;
+}
+
+export interface CanonicalSessionTerminalV1 {
+	canonicalSessionId: string;
+	leaseDisposition: "released" | "not-held";
+	freeAtObservation: true;
+	canonicalSessionLeaseReleased?: true;
+}
+
+export interface ProcessTerminalV1 {
+	version: 1;
+	state: ProcessTerminalState;
+	runId: string;
+	childIndex?: number;
+	runnerProcessInstanceId: string;
+	observedAt?: number;
+	instances?: ProcessInstanceExitV1[];
+	canonicalSession?: CanonicalSessionTerminalV1;
+	resumeDisposition?: "resumable" | "non-resumable" | "unavailable";
+	reason?: ProcessTerminalReason;
+	diagnostic?: string;
+}
 
 export type SteeringActionState = "delivered" | "scheduled" | "pending" | "partial" | "recovered" | "failed";
 export type SteeringTargetState = "scheduled" | "routed" | "delivered" | "late" | "failed" | "recovered";
@@ -349,6 +458,7 @@ export interface SteeringRecoveryDescriptor {
 	initialToolBudget?: ResolvedToolBudget;
 	maxSubagentDepth: number;
 	maxOutput?: MaxOutputConfig;
+	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
 	share: boolean;
 	sessionDir?: string;
 	artifactsDir?: string;
@@ -357,7 +467,7 @@ export interface SteeringRecoveryDescriptor {
 
 export type PublicNestedStepSummary = Pick<
 	NestedStepSummary,
-	"agent" | "status" | "sessionFile" | "transcriptPath" | "transcriptError" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "toolBudget" | "toolBudgetBlocked" | "runnableAt" | "queueDurationMs" | "startedAt" | "endedAt" | "error" | "timedOut" | "stopped"
+	"agent" | "status" | "sessionFile" | "transcriptPath" | "transcriptError" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "usageIncomplete" | "toolBudget" | "toolBudgetBlocked" | "runnableAt" | "queueDurationMs" | "startedAt" | "endedAt" | "error" | "timedOut" | "stopped"
 > & {
 	children?: PublicNestedRunSummary[];
 };
@@ -404,6 +514,7 @@ export interface SubagentResultIntercomPayload {
 	index?: number;
 	artifactPath?: string;
 	sessionPath?: string;
+	parallelHandoff?: ParallelHandoffReference;
 }
 
 // ============================================================================
@@ -639,6 +750,8 @@ export interface SingleResult {
 	toolBudgetBlocked?: boolean;
 	messages?: Message[];
 	usage: Usage;
+	/** True when at least one launched model attempt did not report usage. */
+	usageIncomplete?: boolean;
 	model?: string;
 	/** Effective thinking level used by this foreground child, when known. */
 	thinking?: string;
@@ -672,6 +785,10 @@ export interface SingleResult {
 	transcriptError?: string;
 	children?: NestedRunSummary[];
 	watchdog?: ChildWatchdogProgress;
+	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
+	capabilityAudit?: SubagentCapabilityAudit;
+	lifecycleStatus?: { processTerminal?: ProcessTerminalV1 };
+	parallelHandoff?: ParallelHandoffReference;
 }
 
 export interface SpawnBudgetGrant {
@@ -707,6 +824,8 @@ export interface Details {
 	timedOut?: boolean;
 	stopped?: boolean;
 	turnBudget?: ResolvedTurnBudget;
+	/** Assistant turns already consumed by earlier model attempts in this child run. */
+	turnBudgetOffset?: number;
 	toolBudget?: ResolvedToolBudget;
 	progress?: AgentProgress[];
 	progressSummary?: ProgressSummary;
@@ -731,6 +850,9 @@ export interface Details {
 	// Aggregated cost across all agents in the run
 	totalCost?: CostSummary;
 	spawnBudget?: SpawnBudgetSnapshot;
+	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
+	capabilityAudit?: SubagentCapabilityAudit;
+	parallelHandoff?: ParallelHandoffReference;
 }
 
 // ============================================================================
@@ -793,6 +915,7 @@ export interface NestedStepSummary {
 	currentPath?: string;
 	turnCount?: number;
 	toolCount?: number;
+	usageIncomplete?: boolean;
 	runnableAt?: number;
 	queueDurationMs?: number;
 	startedAt?: number;
@@ -806,6 +929,9 @@ export interface NestedStepSummary {
 	wrapUpRequested?: boolean;
 	toolBudget?: ToolBudgetState;
 	toolBudgetBlocked?: boolean;
+	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
+	capabilityAudit?: SubagentCapabilityAudit;
+	processTerminal?: ProcessTerminalV1;
 	children?: NestedRunSummary[];
 }
 
@@ -821,6 +947,9 @@ export interface NestedRunSummary extends NestedRunAddress {
 	controlInbox?: string;
 	capabilityToken?: string;
 	mode?: SubagentRunMode;
+	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
+	capabilityAudit?: SubagentCapabilityAudit;
+	processTerminal?: ProcessTerminalV1;
 	state: NestedRunState;
 	agent?: string;
 	agents?: string[];
@@ -883,6 +1012,7 @@ export interface AsyncStartedEvent {
 	deadlineAt?: number;
 	turnBudget?: TurnBudgetState;
 	nestedRoute?: NestedRouteInfo;
+	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
 	/** Ephemeral parent/runner capability for authenticating persisted control notices. */
 	controlEventCapability?: string;
 }
@@ -922,6 +1052,10 @@ export interface AsyncStatus {
 	pendingAppends?: number;
 	parallelGroups?: AsyncParallelGroupStatus[];
 	workflowGraph?: WorkflowGraphSnapshot;
+	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
+	capabilityAudit?: SubagentCapabilityAudit;
+	processTerminal?: ProcessTerminalV1;
+	parallelHandoff?: ParallelHandoffReference;
 	steps?: Array<{
 		agent: string;
 		/** Resolved launch context for this child step. */
@@ -966,6 +1100,7 @@ export interface AsyncStatus {
 		thinking?: string;
 		attemptedModels?: string[];
 		modelAttempts?: ModelAttempt[];
+		usageIncomplete?: boolean;
 		totalCost?: CostSummary;
 		steering?: SteeringStatus;
 		error?: string;
@@ -978,6 +1113,9 @@ export interface AsyncStatus {
 		review?: ReviewProjection;
 		effects?: EffectsProjection;
 		watchdog?: ChildWatchdogProgress;
+		capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
+		capabilityAudit?: SubagentCapabilityAudit;
+		processTerminal?: ProcessTerminalV1;
 	}>;
 	sessionDir?: string;
 	outputFile?: string;
@@ -1075,6 +1213,8 @@ export interface ForegroundResumeChild {
 	execution?: ExecutionProjection;
 	review?: ReviewProjection;
 	effects?: EffectsProjection;
+	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
+	capabilityAudit?: SubagentCapabilityAudit;
 	updatedAt?: number;
 }
 
@@ -1194,6 +1334,7 @@ export const INTERCOM_DETACH_REQUEST_EVENT = "pi-intercom:detach-request";
 export const INTERCOM_DETACH_RESPONSE_EVENT = "pi-intercom:detach-response";
 export const SUBAGENT_ASYNC_STARTED_EVENT = "subagent:async-started";
 export const SUBAGENT_ASYNC_COMPLETE_EVENT = "subagent:async-complete";
+export const SUBAGENT_PROCESS_TERMINAL_EVENT = "subagent:process-terminal";
 export const SUBAGENT_FOREGROUND_COMPLETE_EVENT = "subagent:foreground-complete";
 export const SUBAGENT_CONTROL_EVENT = "subagent:control-event";
 export const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
@@ -1217,6 +1358,8 @@ export interface RunSyncOptions {
 	deadlineAt?: number;
 	turnBudget?: ResolvedTurnBudget;
 	toolBudget?: ResolvedToolBudget;
+	/** Tool calls already consumed by earlier model attempts in this child run. */
+	toolBudgetOffset?: number;
 	allowZeroToolBudget?: boolean;
 	allowIntercomDetach?: boolean;
 	intercomEvents?: IntercomEventBus;
@@ -1239,6 +1382,7 @@ export interface RunSyncOptions {
 	maxSubagentDepth?: number;
 	/** Effective parent wait-tool setting propagated to the child runtime. */
 	waitToolEnabled?: boolean;
+	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
 	nestedRoute?: NestedRouteInfo;
 	/** Override the agent's default model (format: "provider/id" or just "id") */
 	modelOverride?: string;

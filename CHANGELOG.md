@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- Added a public `pi-subagents/preflight` API that resolves an ordinary single-agent launch contract without creating child sessions, temp prompt files, structured-output runtimes, or run artifacts. Thanks to @shaggitza for #634.
+- Added an out-of-band, session-scoped capability-ceiling API for monotonic child tool and extension restrictions, with inherited async/nested propagation and bounded audit metadata. Thanks to aoguai for #585.
+- Added durable v3 process-terminal proof for detached async runners, with exact close observation, conservative unknown states after observer loss, and status/RPC projections. Thanks to shaggitza for #626.
+- Added versioned aggregate handoff manifests for worktree-isolated parallel runs, including per-child status and output references, durable patch metadata, explicit cleanup outcomes, async status/result projection, and completion-delivery paths.
+- Added `subagents.defaultThinking` so user/project settings can supply a default thinking level without overriding explicit agent frontmatter or per-agent overrides.
 - Added delegation v2 for extension-owned concurrent foreground leaves, with logical run/node ownership, exact per-attempt cancellation, explicit duplicate-node outcomes, literal or structured values, effective model/thinking metadata, detailed usage, and an exact zero-tool budget while preserving delegation v1 and the model-facing single-dispatch guard. Thanks to Jakub Neumann (@neumie) for #610.
 - Added acknowledged `steer` support to the extension RPC for exact-child async orchestration without recovery replacement. Thanks to Daan Bosch (@daanbosch) for #607.
 - Added a persistent below-editor FleetView with safe empty-editor navigation and a structured inspector for Markdown, code, tool calls, and compact or expanded tool results. Thanks to Rui Pu (@Zeppelinpp) for #587.
@@ -13,6 +18,9 @@
 - Show each subagent child’s resolved `[fresh]` or `[fork]` launch context in foreground results, async status, fleet, and widget surfaces, with `[mixed]` on aggregate headers when a run uses both modes.
 
 ### Fixed
+- Kept discovery and intercom tests hermetic so the suite no longer backs up, deletes, or rewrites the user's real `~/.agents` tree or process home, and made Fleet inspector elapsed-time assertions deterministic through an injected clock without changing runtime timing behavior.
+- Preserved `stopped` as a terminal state across supervisor requests, waits, and completion notifications; bounded native supervisor replies to 64 KiB; removed consumed reply files; and prevented queued foreground work from launching after parent cancellation.
+- Kept turn/tool budgets cumulative across model fallbacks, marked unobserved usage as partial instead of exact zero, omitted incomplete aggregate costs, and added duration, tool-count, usage, and cost parity to async metadata.
 - Kept foreground slash execution commands responsive while their live result finalization continues asynchronously. Thanks to Eli Stark (@white-hat) for #594.
 - Re-armed remembered detached foreground children on every blocking `contact_supervisor` request so targeted `subagent_wait` calls wake for repeated supervisor decisions.
 - Suspended the persistent FleetView while its inspector overlay is open, preventing live status redraws from leaving repeated inspector frames in terminal scrollback.

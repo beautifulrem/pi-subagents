@@ -72,6 +72,7 @@ describe("async status helpers", () => {
 					agentContract: { version: 1 },
 					execution: { status: "completed", success: true, exitCode: 0 },
 					acceptance: { status: "rejected", effectiveAcceptance: { level: "checked", explicit: true } },
+					usageIncomplete: true,
 					review: { status: "not-requested" },
 					effects: { fileMutation: { status: "missing", expected: true, attempted: false } },
 				}],
@@ -82,6 +83,7 @@ describe("async status helpers", () => {
 			assert.equal(step?.agentContract?.version, 1);
 			assert.deepEqual(step?.execution, { status: "completed", success: true, exitCode: 0 });
 			assert.equal(step?.acceptance?.status, "rejected");
+			assert.equal(step?.usageIncomplete, true);
 			assert.equal(step?.review?.status, "not-requested");
 			assert.equal(step?.effects?.fileMutation?.status, "missing");
 		} finally {

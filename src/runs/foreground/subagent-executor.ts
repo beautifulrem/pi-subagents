@@ -47,11 +47,13 @@ import { formatControlIntercomMessage, formatControlNoticeMessage, resolveContro
 import { resolveTurnBudgetConfig } from "../shared/turn-budget.ts";
 import { formatSpawnBudget, getSpawnBudgetSnapshot, grantSpawnBudget, preflightSpawnBudget, preflightSpawnBudgetGrant, reserveSpawnBudget } from "../shared/spawn-budget.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
+import { intersectSubagentCapabilityCeilings, resolveCurrentSubagentCapabilityCeiling, type ResolvedSubagentCapabilityCeiling } from "../shared/capability-ceiling.ts";
 import { isAgentContractV1 } from "../shared/agent-contract.ts";
 import { finalizeSingleOutput, injectSingleOutputInstruction, normalizeSingleOutputOverride, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
 import { createStructuredOutputRuntime } from "../shared/structured-output.ts";
 import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, readStatus, resolveChildCwd, sumResultsCost, sumResultsUsage } from "../../shared/utils.ts";
 import { DEFAULT_GLOBAL_CONCURRENCY_LIMIT, Semaphore } from "../shared/parallel-utils.ts";
+import { formatParallelHandoffError, formatParallelHandoffReference, parallelHandoffPath, writeParallelHandoffGroup } from "../shared/parallel-handoff.ts";
 import { summarizeContextModes, type ContextMode, type ContextSummary } from "../shared/context-mode.ts";
 import {
 	attachNestedChildrenToResultChildren,
@@ -407,6 +409,8 @@ function rememberForegroundRun(state: SubagentState, input: { runId: string; mod
 				...(result.transcriptError ? { transcriptError: result.transcriptError } : {}),
 				...(result.detachedReason ? { detachedReason: result.detachedReason } : {}),
 				...(result.acceptance ? { acceptance: result.acceptance } : {}),
+				...(result.capabilityCeiling ? { capabilityCeiling: result.capabilityCeiling } : {}),
+				...(result.capabilityAudit ? { capabilityAudit: result.capabilityAudit } : {}),
 			};
 			const recovered = previous?.children[index];
 			return child.status === "detached" && recovered && recovered.status !== "detached" ? recovered : child;
@@ -470,6 +474,8 @@ function updateRememberedForegroundChild(state: SubagentState, input: { runId: s
 		...(input.result.transcriptError ? { transcriptError: input.result.transcriptError } : {}),
 		...(input.result.detachedReason ? { detachedReason: input.result.detachedReason } : {}),
 		...(input.result.acceptance ? { acceptance: input.result.acceptance } : {}),
+		...(input.result.capabilityCeiling ? { capabilityCeiling: input.result.capabilityCeiling } : {}),
+		...(input.result.capabilityAudit ? { capabilityAudit: input.result.capabilityAudit } : {}),
 	};
 	trimRememberedForegroundRuns(state);
 	const output = getSingleResultOutput(input.result).trim();
@@ -498,7 +504,7 @@ function updateRememberedForegroundChild(state: SubagentState, input: { runId: s
 	});
 }
 
-function resolveForegroundResumeTarget(params: SubagentParamsLike, state: SubagentState): { runId: string; mode: "single" | "parallel" | "chain"; state: "complete"; agent: string; index: number; cwd: string; sessionFile: string } | undefined {
+function resolveForegroundResumeTarget(params: SubagentParamsLike, state: SubagentState): { runId: string; mode: "single" | "parallel" | "chain"; state: "complete"; agent: string; index: number; cwd: string; sessionFile: string; capabilityCeiling?: ResolvedSubagentCapabilityCeiling } | undefined {
 	const requested = (params.id ?? params.runId)?.trim();
 	if (!requested || !state.foregroundRuns?.size || !state.currentSessionId) return undefined;
 	const sessionRuns = [...state.foregroundRuns.values()].filter((run) => run.sessionId === state.currentSessionId);
@@ -517,7 +523,7 @@ function resolveForegroundResumeTarget(params: SubagentParamsLike, state: Subage
 	if (path.extname(child.sessionFile) !== ".jsonl") throw new Error(`Foreground run '${run.runId}' child ${index} session file must be a .jsonl file: ${child.sessionFile}`);
 	const sessionFile = path.resolve(child.sessionFile);
 	if (!fs.existsSync(sessionFile)) throw new Error(`Foreground run '${run.runId}' child ${index} session file does not exist: ${child.sessionFile}`);
-	return { runId: run.runId, mode: run.mode, state: "complete", agent: child.agent, index, cwd: run.cwd, sessionFile };
+	return { runId: run.runId, mode: run.mode, state: "complete", agent: child.agent, index, cwd: run.cwd, sessionFile, ...(child.capabilityCeiling ? { capabilityCeiling: child.capabilityCeiling } : {}) };
 }
 
 type AsyncResumeSourceTarget = ReturnType<typeof resolveAsyncResumeTarget> & { source: "async" };
@@ -531,6 +537,7 @@ type NestedResumeSourceTarget = {
 	index: number;
 	cwd?: string;
 	sessionFile: string;
+	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
 };
 type ResumeSourceTarget = AsyncResumeSourceTarget | ForegroundResumeSourceTarget | NestedResumeSourceTarget;
 
@@ -987,6 +994,7 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 		index: 0,
 		cwd: asyncDir ? path.dirname(asyncDir) : undefined,
 		sessionFile: validateNestedSessionFile(run, trustedSessionRoots),
+		...(run.capabilityCeiling ? { capabilityCeiling: run.capabilityCeiling } : {}),
 	};
 }
 
@@ -1280,6 +1288,7 @@ async function resumeAsyncRun(input: {
 			controlIntercomTarget: intercomBridge.active ? intercomBridge.orchestratorTarget : undefined,
 			childIntercomTarget: intercomBridge.active ? (agent, index) => resolveSubagentIntercomTarget(runId, agent, index) : undefined,
 			globalConcurrencyLimit: input.deps.config.globalConcurrencyLimit,
+			capabilityCeiling: intersectSubagentCapabilityCeilings(target.capabilityCeiling, resolveCurrentSubagentCapabilityCeiling(input.deps.state.currentSessionId)),
 		});
 		if (result.isError) return result;
 		const attachedId = result.details.asyncId ?? runId;
@@ -1349,6 +1358,7 @@ async function resumeAsyncRun(input: {
 		...(input.absoluteDeadlineAt !== undefined ? { absoluteDeadlineAt: input.absoluteDeadlineAt } : {}),
 		...(input.params.turnBudget !== undefined ? { turnBudget: input.params.turnBudget } : {}),
 		...(input.params.toolBudget !== undefined ? { toolBudget: input.params.toolBudget } : {}),
+		capabilityCeiling: intersectSubagentCapabilityCeilings(target.capabilityCeiling, recoveryDescriptor?.capabilityCeiling, resolveCurrentSubagentCapabilityCeiling(input.deps.state.currentSessionId)),
 	});
 	if (result.isError) return result;
 
@@ -1408,6 +1418,7 @@ async function emitForegroundResultIntercom(input: {
 	results: SingleResult[];
 	chainSteps?: number;
 	nestedChildren?: NestedRunSummary[];
+	parallelHandoff?: Details["parallelHandoff"];
 }): Promise<ReturnType<typeof buildSubagentResultIntercomPayload> | null> {
 	if (!input.intercomBridge.active || !input.intercomBridge.orchestratorTarget) return null;
 	const children = input.results.flatMap((result, index) => result.detached ? [] : [{
@@ -1431,6 +1442,7 @@ async function emitForegroundResultIntercom(input: {
 		source: "foreground",
 		children: attachNestedChildrenToResultChildren(input.runId, children, input.nestedChildren),
 		...(typeof input.chainSteps === "number" ? { chainSteps: input.chainSteps } : {}),
+		...(input.parallelHandoff ? { parallelHandoff: input.parallelHandoff } : {}),
 	});
 	const delivered = await deliverSubagentResultIntercomEvent(input.pi.events, payload);
 	if (!delivered) return null;
@@ -1455,6 +1467,7 @@ async function maybeBuildForegroundIntercomReceipt(input: {
 		results: input.details.results,
 		...(typeof input.details.totalSteps === "number" ? { chainSteps: input.details.totalSteps } : {}),
 		...(input.nestedChildren?.length ? { nestedChildren: input.nestedChildren } : {}),
+		...(input.details.parallelHandoff ? { parallelHandoff: input.details.parallelHandoff } : {}),
 	});
 	if (!payload) return null;
 	return {
@@ -2477,15 +2490,44 @@ function resolveParallelTaskCwd(
 	return resolveChildCwd(paramsCwd, task.cwd);
 }
 
-function buildParallelWorktreeSuffix(
-	worktreeSetup: WorktreeSetup | undefined,
-	artifactsDir: string,
-	tasks: TaskParam[],
-): string {
-	if (!worktreeSetup) return "";
-	const diffsDir = path.join(artifactsDir, "worktree-diffs");
-	const diffs = diffWorktrees(worktreeSetup, tasks.map((task) => task.agent), diffsDir);
-	return formatWorktreeDiffSummary(diffs);
+function finalizeParallelWorktreeHandoff(input: {
+	worktreeSetup: WorktreeSetup;
+	artifactsDir: string;
+	runId: string;
+	cwd: string;
+	tasks: TaskParam[];
+	results: SingleResult[];
+}): { suffix: string; reference?: NonNullable<Details["parallelHandoff"]> } {
+	const diffsDir = path.join(input.artifactsDir, "worktree-diffs", input.runId);
+	const diffs = diffWorktrees(input.worktreeSetup, input.tasks.map((task) => task.agent), diffsDir);
+	const cleanup = cleanupWorktrees(input.worktreeSetup);
+	const diffSummary = formatWorktreeDiffSummary(diffs);
+	try {
+		const reference = writeParallelHandoffGroup({
+			manifestPath: parallelHandoffPath(input.artifactsDir, input.runId),
+			runId: input.runId,
+			mode: "parallel",
+			source: "foreground",
+			cwd: input.cwd,
+			stepIndex: 0,
+			flatStartIndex: 0,
+			setup: input.worktreeSetup,
+			diffs,
+			cleanup,
+			results: input.results.map((result) => ({
+				agent: result.agent,
+				status: resolveSubagentResultStatus({ exitCode: result.exitCode, interrupted: result.interrupted, detached: result.detached, state: result.stopped ? "stopped" : undefined }),
+				summary: resultSummaryForIntercom(result),
+				...(result.artifactPaths?.outputPath ? { outputPath: result.artifactPaths.outputPath } : {}),
+				...(result.structuredOutput !== undefined ? { structuredOutput: result.structuredOutput } : {}),
+				...(result.structuredOutputPath ? { structuredOutputPath: result.structuredOutputPath } : {}),
+				...(result.sessionFile ? { sessionPath: result.sessionFile } : {}),
+			})),
+		});
+		return { suffix: [diffSummary, formatParallelHandoffReference(reference)].filter(Boolean).join("\n\n"), reference };
+	} catch (error) {
+		return { suffix: [diffSummary, formatParallelHandoffError(error)].filter(Boolean).join("\n\n") };
+	}
 }
 
 function findDuplicateParallelOutputPath(input: {
@@ -2520,6 +2562,14 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 		input.sessionFileForTask(input.tasks[i]!.agent, i, input.modelOverrides[i]);
 	}
 	return mapConcurrent(input.tasks, input.concurrencyLimit, async (task, index) => {
+		if (input.signal.aborted) {
+			return runSync(input.ctx.cwd, input.agents, task.agent, input.taskTexts[index]!, {
+				runId: input.runId,
+				index,
+				signal: input.signal,
+				context: input.contextPolicy.contextForAgent(task.agent),
+			});
+		}
 		const behavior = input.behaviors[index];
 		const effectiveSkills = behavior?.skills;
 		const taskCwd = resolveParallelTaskCwd(task, input.paramsCwd, input.worktreeSetup, index);
@@ -2844,6 +2894,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 	);
 	if (errorResult) return errorResult;
 
+	let worktreeFinalized = false;
 	try {
 		const outputBaseDir = path.join(artifactsDir, "outputs", runId);
 		const duplicateOutputError = findDuplicateParallelOutputPath({
@@ -2933,6 +2984,11 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			updateForegroundNestedProjection(foregroundControl);
 			attachRootChildrenToSteps(runId, results, foregroundControl.nestedChildren);
 		}
+		let handoff: ReturnType<typeof finalizeParallelWorktreeHandoff> | undefined;
+		if (worktreeSetup) {
+			worktreeFinalized = true;
+			handoff = finalizeParallelWorktreeHandoff({ worktreeSetup, artifactsDir, runId, cwd: effectiveCwd, tasks, results });
+		}
 		const interrupted = results.find((result) => result.interrupted);
 		const details = compactForegroundDetails({
 			mode: "parallel",
@@ -2942,6 +2998,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			artifacts: allArtifactPaths.length ? { dir: artifactsDir, files: allArtifactPaths } : undefined,
 			totalChildUsage: sumResultsUsage(results),
 			totalCost: sumResultsCost(results),
+			...(handoff?.reference ? { parallelHandoff: handoff.reference } : {}),
 		});
 		rememberForegroundRun(deps.state, { runId, mode: "parallel", cwd: effectiveCwd, sessionId: data.parentSessionId, results: details.results });
 		if (interrupted) {
@@ -2976,7 +3033,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			};
 		}
 
-		const worktreeSuffix = buildParallelWorktreeSuffix(worktreeSetup, artifactsDir, tasks);
+		const worktreeSuffix = handoff?.suffix ?? "";
 		const ok = results.filter((result) => result.exitCode === 0).length;
 		const downgradeNote = backgroundRequestedWhileClarifying ? " (background requested, but clarify kept this run foreground)" : "";
 		const aggregatedOutput = aggregateParallelOutputs(
@@ -3000,7 +3057,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			details,
 		};
 	} finally {
-		if (worktreeSetup) cleanupWorktrees(worktreeSetup);
+		if (worktreeSetup && !worktreeFinalized) cleanupWorktrees(worktreeSetup);
 	}
 }
 

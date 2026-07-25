@@ -5,6 +5,7 @@ import {
 	type IntercomEventBus,
 	type NestedRunSummary,
 	type PublicNestedRunSummary,
+	type ParallelHandoffReference,
 	type SingleResult,
 	type SubagentResultIntercomChild,
 	type SubagentResultIntercomPayload,
@@ -115,6 +116,7 @@ function compactNestedRun(run: NestedRunSummary | PublicNestedRunSummary, depth 
 			...(step.currentPath ? { currentPath: step.currentPath } : {}),
 			...(step.turnCount !== undefined ? { turnCount: step.turnCount } : {}),
 			...(step.toolCount !== undefined ? { toolCount: step.toolCount } : {}),
+			...(step.usageIncomplete ? { usageIncomplete: true } : {}),
 			...(step.runnableAt !== undefined ? { runnableAt: step.runnableAt } : {}),
 			...(step.queueDurationMs !== undefined ? { queueDurationMs: step.queueDurationMs } : {}),
 			...(step.startedAt !== undefined ? { startedAt: step.startedAt } : {}),
@@ -181,6 +183,7 @@ interface GroupedResultIntercomMessageInput {
 	asyncId?: string;
 	asyncDir?: string;
 	chainSteps?: number;
+	parallelHandoff?: ParallelHandoffReference;
 }
 
 function asyncResumeGuidance(input: {
@@ -209,6 +212,7 @@ function formatSubagentResultIntercomMessage(input: {
 	asyncId?: string;
 	asyncDir?: string;
 	chainSteps?: number;
+	parallelHandoff?: ParallelHandoffReference;
 }): string {
 	const counts = countStatuses(input.children);
 	const lines: string[] = [
@@ -224,6 +228,7 @@ function formatSubagentResultIntercomMessage(input: {
 	}
 	if (input.asyncId) lines.push(`Async id: ${input.asyncId}`);
 	if (input.asyncDir) lines.push(`Async dir: ${input.asyncDir}`);
+	if (input.parallelHandoff) lines.push(`Parallel handoff: ${input.parallelHandoff.path}`);
 	const resumeGuidance = asyncResumeGuidance(input);
 	if (resumeGuidance) lines.push(resumeGuidance);
 	if (input.children.some((child) => child.intercomTarget)) {
@@ -268,6 +273,7 @@ export function buildSubagentResultIntercomPayload(input: GroupedResultIntercomM
 		...(input.asyncId ? { asyncId: input.asyncId } : {}),
 		...(input.asyncDir ? { asyncDir: input.asyncDir } : {}),
 		...(typeof input.chainSteps === "number" ? { chainSteps: input.chainSteps } : {}),
+		...(input.parallelHandoff ? { parallelHandoff: input.parallelHandoff } : {}),
 		...(firstChild?.agent ? { agent: firstChild.agent } : {}),
 		...(firstChild?.index !== undefined ? { index: firstChild.index } : {}),
 		...(firstChild?.artifactPath ? { artifactPath: firstChild.artifactPath } : {}),
@@ -353,6 +359,7 @@ export function formatSubagentResultReceipt(input: {
 		`Run: ${input.runId}`,
 		`Children: ${formatStatusCounts(counts)}`,
 	];
+	if (input.payload.parallelHandoff) lines.push(`Parallel handoff: ${input.payload.parallelHandoff.path}`);
 
 	const artifacts = input.payload.children.filter((child) => typeof child.artifactPath === "string");
 	if (artifacts.length > 0) {

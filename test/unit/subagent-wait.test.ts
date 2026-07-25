@@ -240,6 +240,24 @@ describe("subagent_wait tool", () => {
 		}
 	});
 
+	it("reports a run that transitions to stopped while waiting", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-stopped-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-stopped", "running", { sessionId: "sess-1", pid: 999999 });
+
+			const result = await waitForSubagents({ id: "run-stopped" }, undefined, baseDeps(root, state, {
+				sleep: async () => writeStatus(asyncRoot, "run-stopped", "stopped", { sessionId: "sess-1" }),
+			}));
+
+			assert.equal(result.isError, undefined);
+			assert.match(textOf(result), /Outcome: 1 stopped/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("surfaces failed terminal runs as errors only for internal auto-drain", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-drain-failure-"));
 		try {

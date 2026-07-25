@@ -605,6 +605,7 @@ describe("result watcher", () => {
 					results: [{ agent: "owner", output: "owner done", success: true }],
 					sessionId: "session-1",
 					intercomTarget: "subagent-chat-main",
+					parallelHandoff: { version: 1, path: "/tmp/async-nested-root/handoff.json", groupCount: 1, childCount: 1, changedPatches: 1, cleanupState: "complete" },
 				}), "utf-8");
 				watcher.primeExistingResults();
 				await new Promise((resolve) => setTimeout(resolve, 100));
@@ -613,14 +614,17 @@ describe("result watcher", () => {
 			}
 
 			assert.equal(fs.existsSync(resultPath), false);
-			const intercomPayload = emitted.find((entry) => entry.event === "subagent:result-intercom")?.data as { children?: Array<{ children?: Array<{ id?: string; controlInbox?: string; capabilityToken?: string }> }>; message?: string } | undefined;
+			const intercomPayload = emitted.find((entry) => entry.event === "subagent:result-intercom")?.data as { children?: Array<{ children?: Array<{ id?: string; controlInbox?: string; capabilityToken?: string }> }>; message?: string; parallelHandoff?: { path?: string } } | undefined;
 			assert.equal(intercomPayload?.children?.[0]?.children?.[0]?.id, "nested-child");
 			assert.equal(intercomPayload?.children?.[0]?.children?.[0]?.controlInbox, undefined);
 			assert.equal(intercomPayload?.children?.[0]?.children?.[0]?.capabilityToken, undefined);
+			assert.equal(intercomPayload?.parallelHandoff?.path, "/tmp/async-nested-root/handoff.json");
+			assert.match(String(intercomPayload?.message ?? ""), /Parallel handoff: \/tmp\/async-nested-root\/handoff\.json/);
 			assert.match(String(intercomPayload?.message ?? ""), /Nested subagents:/);
-			const completion = emitted.find((entry) => entry.event === "subagent:async-complete")?.data as { nestedChildren?: Array<{ id?: string }>; results?: Array<{ children?: Array<{ id?: string }> }> } | undefined;
+			const completion = emitted.find((entry) => entry.event === "subagent:async-complete")?.data as { nestedChildren?: Array<{ id?: string }>; results?: Array<{ children?: Array<{ id?: string }> }>; parallelHandoff?: { path?: string } } | undefined;
 			assert.equal(completion?.nestedChildren?.[0]?.id, "nested-child");
 			assert.equal(completion?.results?.[0]?.children?.[0]?.id, "nested-child");
+			assert.equal(completion?.parallelHandoff?.path, "/tmp/async-nested-root/handoff.json");
 		} finally {
 			fs.rmSync(resultsDir, { recursive: true, force: true });
 			fs.rmSync(path.dirname(route.eventSink), { recursive: true, force: true });

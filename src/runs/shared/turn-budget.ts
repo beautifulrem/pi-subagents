@@ -23,17 +23,18 @@ export function resolveTurnBudgetConfig(
 	return { turnBudget: { maxTurns: budget.maxTurns, graceTurns } };
 }
 
-export function appendTurnBudgetSystemPrompt(systemPrompt: string, budget: ResolvedTurnBudget | undefined): string {
+export function appendTurnBudgetSystemPrompt(systemPrompt: string, budget: ResolvedTurnBudget | undefined, turnsUsed = 0): string {
 	if (!budget) return systemPrompt;
 	const grace = budget.graceTurns === 1 ? "1 additional assistant turn" : `${budget.graceTurns} additional assistant turns`;
 	const block = [
 		"## Turn budget",
 		`This child run has a soft budget of ${budget.maxTurns} assistant turn${budget.maxTurns === 1 ? "" : "s"}.`,
+		turnsUsed > 0 ? `${turnsUsed} assistant turn${turnsUsed === 1 ? " has" : "s have"} already been consumed by earlier model attempts.` : undefined,
 		`After that, ${grace} may be allowed only for a final wrap-up.`,
 		"When you approach or reach the soft budget, stop starting new tool work and return the final answer immediately.",
 		"This runner uses process-mode execution, so live steering after launch may be unavailable; treat this instruction as the wrap-up request.",
 		"If you continue past the soft budget plus grace turns, the supervisor may abort the process and return only partial output.",
-	].join("\n");
+	].filter((line): line is string => Boolean(line)).join("\n");
 	return systemPrompt.trim() ? `${systemPrompt.trim()}\n\n${block}` : block;
 }
 

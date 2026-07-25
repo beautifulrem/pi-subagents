@@ -9,6 +9,8 @@ import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
 import { flatToLogicalStepIndex, normalizeParallelGroups } from "./parallel-groups.ts";
 import { contextModeLabel, summarizeContextModes, type ContextMode, type ContextSummary } from "../shared/context-mode.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
+import type { ResolvedSubagentCapabilityCeiling, SubagentCapabilityAudit } from "../shared/capability-ceiling.ts";
+import { readProcessTerminal, sanitizeProcessTerminal } from "./process-terminal.ts";
 
 interface AsyncRunStepSummary {
 	index: number;
@@ -40,6 +42,7 @@ interface AsyncRunStepSummary {
 	thinking?: string;
 	attemptedModels?: string[];
 	modelAttempts?: AsyncJobStep["modelAttempts"];
+	usageIncomplete?: boolean;
 	sessionFile?: string;
 	transcriptPath?: string;
 	error?: string;
@@ -53,6 +56,9 @@ interface AsyncRunStepSummary {
 	execution?: AsyncJobStep["execution"];
 	review?: AsyncJobStep["review"];
 	effects?: AsyncJobStep["effects"];
+	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
+	capabilityAudit?: SubagentCapabilityAudit;
+	processTerminal?: AsyncJobStep["processTerminal"];
 	children?: NestedRunSummary[];
 }
 
@@ -95,6 +101,9 @@ export interface AsyncRunSummary {
 	sessionFile?: string;
 	nestedChildren?: NestedRunSummary[];
 	nestedWarnings?: string[];
+	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
+	capabilityAudit?: SubagentCapabilityAudit;
+	processTerminal?: AsyncStatus["processTerminal"];
 }
 
 interface AsyncRunListOptions {
@@ -205,6 +214,8 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 		}
 	}
 	const { activityState, lastActivityAt } = deriveAsyncActivityState(asyncDir, status);
+	const processTerminal = readProcessTerminal(asyncDir, { runId: status.runId, runnerProcessInstanceId: status.processTerminal?.runnerProcessInstanceId })
+		?? sanitizeProcessTerminal(status.processTerminal, { runId: status.runId, runnerProcessInstanceId: status.processTerminal?.runnerProcessInstanceId }, path.join(asyncDir, "status.json"));
 	const steps = status.steps ?? [];
 	const chainStepCount = status.chainStepCount ?? steps.length;
 	const parallelGroups = normalizeParallelGroups(status.parallelGroups, steps.length, chainStepCount);
@@ -251,6 +262,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.thinking ? { thinking: step.thinking } : {}),
 			...(step.attemptedModels ? { attemptedModels: step.attemptedModels } : {}),
 			...(step.modelAttempts ? { modelAttempts: step.modelAttempts } : {}),
+			...(step.usageIncomplete ? { usageIncomplete: true } : {}),
 			...(step.sessionFile ? { sessionFile: step.sessionFile } : {}),
 			...(step.transcriptPath ? { transcriptPath: step.transcriptPath } : {}),
 			...(step.error ? { error: step.error } : {}),
@@ -264,6 +276,9 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.execution ? { execution: step.execution } : {}),
 			...(step.review ? { review: step.review } : {}),
 			...(step.effects ? { effects: step.effects } : {}),
+			...(step.capabilityCeiling ? { capabilityCeiling: step.capabilityCeiling } : {}),
+			...(step.capabilityAudit ? { capabilityAudit: step.capabilityAudit } : {}),
+			...(step.processTerminal ? { processTerminal: sanitizeProcessTerminal(step.processTerminal, { runId: status.runId, runnerProcessInstanceId: step.processTerminal.runnerProcessInstanceId }, `${path.join(asyncDir, "status.json")} step ${index}`) } : {}),
 			...(step.children?.length ? { children: step.children } : {}),
 		};
 	});
@@ -302,6 +317,9 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 		steps: summarizedSteps,
 		...(nestedChildren.length ? { nestedChildren } : {}),
 		...(nestedWarnings.length ? { nestedWarnings } : {}),
+		...(status.capabilityCeiling ? { capabilityCeiling: status.capabilityCeiling } : {}),
+		...(status.capabilityAudit ? { capabilityAudit: status.capabilityAudit } : {}),
+		...(processTerminal ? { processTerminal } : {}),
 		...(status.sessionDir ? { sessionDir: status.sessionDir } : {}),
 		...(status.outputFile ? { outputFile: status.outputFile } : {}),
 		...(status.totalTokens ? { totalTokens: status.totalTokens } : {}),

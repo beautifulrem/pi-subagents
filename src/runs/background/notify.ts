@@ -14,17 +14,18 @@ import {
 	createCompletionBatcher,
 	resolveCompletionBatchConfig,
 } from "./completion-batcher.ts";
-import { SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_FOREGROUND_COMPLETE_EVENT, type SubagentState } from "../../shared/types.ts";
+import { SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_FOREGROUND_COMPLETE_EVENT, type ParallelHandoffReference, type SubagentState } from "../../shared/types.ts";
 
 export interface SubagentNotifyDetails {
 	agent: string;
-	status: "completed" | "failed" | "paused";
+	status: "completed" | "failed" | "paused" | "stopped";
 	source?: "async" | "foreground";
 	taskInfo?: string;
 	resultPreview: string;
 	durationMs?: number;
 	sessionLabel?: string;
 	sessionValue?: string;
+	handoffPath?: string;
 }
 
 export interface CompletionNotification {
@@ -47,6 +48,7 @@ export interface CompletionNotification {
 	totalTasks?: number;
 	sessionId?: string | null;
 	triggerTurn?: boolean;
+	parallelHandoff?: ParallelHandoffReference;
 }
 
 interface NotifyTimerApi {
@@ -77,6 +79,8 @@ export function formatSingleCompletion(details: SubagentNotifyDetails): string {
 		`${taskKind} ${details.status}: **${details.agent}**${details.taskInfo ?? ""}`,
 		"",
 		details.resultPreview.trim() ? details.resultPreview : "(no output)",
+		details.handoffPath ? "" : undefined,
+		details.handoffPath ? `Parallel handoff: ${details.handoffPath}` : undefined,
 		sessionLine ? "" : undefined,
 		sessionLine,
 	]
@@ -86,18 +90,25 @@ export function formatSingleCompletion(details: SubagentNotifyDetails): string {
 
 export function parseSubagentNotifyContent(content: string): SubagentNotifyDetails | undefined {
 	const lines = content.split("\n");
-	const match = (lines[0] ?? "").match(/^(Background task|Detached foreground task) (completed|failed|paused): \*\*(.+?)\*\*(?:\s+(\([^)]*\)))?$/);
+	const match = (lines[0] ?? "").match(/^(Background task|Detached foreground task) (completed|failed|paused|stopped): \*\*(.+?)\*\*(?:\s+(\([^)]*\)))?$/);
 	if (!match) return undefined;
 	const body = lines.slice(2);
-	let sessionIndex = -1;
-	for (let i = body.length - 1; i >= 1; i--) {
-		if (body[i - 1]?.trim() === "" && /^(Session|Session file|Session share error):\s+/.test(body[i]!)) {
-			sessionIndex = i;
-			break;
-		}
-	}
+	let resultEnd = body.length;
+	const sessionIndex = resultEnd >= 2
+		&& body[resultEnd - 2]?.trim() === ""
+		&& /^(Session|Session file|Session share error):\s+/.test(body[resultEnd - 1]!)
+		? resultEnd - 1
+		: -1;
 	const sessionLine = sessionIndex >= 0 ? body[sessionIndex] : undefined;
-	const resultPreview = (sessionIndex >= 0 ? body.slice(0, sessionIndex) : body).join("\n").trim() || "(no output)";
+	if (sessionIndex >= 0) resultEnd = sessionIndex - 1;
+	const handoffIndex = resultEnd >= 2
+		&& body[resultEnd - 2]?.trim() === ""
+		&& body[resultEnd - 1]?.startsWith("Parallel handoff: ")
+		? resultEnd - 1
+		: -1;
+	if (handoffIndex >= 0) resultEnd = handoffIndex - 1;
+	const resultPreview = body.slice(0, resultEnd).join("\n").trim() || "(no output)";
+	const handoffPath = handoffIndex >= 0 ? body[handoffIndex]!.slice("Parallel handoff: ".length).trim() : undefined;
 	let sessionLabel: string | undefined;
 	let sessionValue: string | undefined;
 	if (sessionLine) {
@@ -111,6 +122,7 @@ export function parseSubagentNotifyContent(content: string): SubagentNotifyDetai
 		...(match[1] === "Detached foreground task" ? { source: "foreground" as const } : {}),
 		...(match[4] ? { taskInfo: match[4] } : {}),
 		resultPreview,
+		...(handoffPath ? { handoffPath } : {}),
 		...(sessionLabel && sessionValue ? { sessionLabel, sessionValue } : {}),
 	};
 }
@@ -124,6 +136,7 @@ export function formatGroupedCompletion(details: SubagentNotifyDetails[]): strin
 		const sessionLine = formatSessionLine(detail);
 		blocks.push(`${index + 1}. ${detail.agent}${detail.taskInfo ?? ""}`);
 		blocks.push(detail.resultPreview.trim() ? detail.resultPreview : "(no output)");
+		if (detail.handoffPath) blocks.push(`Parallel handoff: ${detail.handoffPath}`);
 		if (sessionLine) blocks.push(sessionLine);
 		blocks.push("");
 	}
@@ -147,6 +160,7 @@ function sendCompletion(pi: Pick<ExtensionAPI, "sendMessage">, items: PendingCom
 				customType: "subagent-notify",
 				content,
 				display: true,
+				...(details.length === 1 && details[0]?.handoffPath ? { details: details[0] } : {}),
 			},
 			{ triggerTurn: items.some((item) => item.triggerTurn) },
 		);
@@ -171,12 +185,16 @@ export function buildCompletionDetails(result: CompletionNotification): Subagent
 		|| result.state === "paused"
 		|| summary.startsWith("Paused after interrupt.")
 	);
-	const status = paused ? "paused" : result.success ? "completed" : "failed";
+	const status = !result.success && result.state === "stopped" ? "stopped" : paused ? "paused" : result.success ? "completed" : "failed";
 	const taskInfo =
 		result.taskIndex !== undefined && result.totalTasks !== undefined
 			? ` (${result.taskIndex + 1}/${result.totalTasks})`
 			: undefined;
 
+	const parallelHandoff = result.parallelHandoff && typeof result.parallelHandoff === "object"
+		? result.parallelHandoff as { path?: unknown }
+		: undefined;
+	const handoffPath = typeof parallelHandoff?.path === "string" ? parallelHandoff.path : undefined;
 	const session =
 		result.shareUrl
 			? { label: "Session", value: result.shareUrl }
@@ -192,6 +210,7 @@ export function buildCompletionDetails(result: CompletionNotification): Subagent
 		...(taskInfo ? { taskInfo } : {}),
 		resultPreview: summary,
 		...(typeof result.durationMs === "number" ? { durationMs: result.durationMs } : {}),
+		...(handoffPath ? { handoffPath } : {}),
 		...(session ? { sessionLabel: session.label, sessionValue: session.value } : {}),
 	};
 }

@@ -179,10 +179,11 @@ describe("native subagent fleet", () => {
 			);
 			try {
 				const lines = component.render(100);
+				const compactLines = lines.join("").replaceAll(/[│\s]/g, "");
 				assert.ok(lines.some((line) => line.includes("FINAL ASYNC OUTPUT")));
-				assert.ok(lines.some((line) => line.includes("output-0.log")));
+				assert.ok(compactLines.includes("output-0.log"));
 				assert.ok(lines.some((line) => line.includes("worker") && line.includes("[fork]")));
-				assert.ok(lines.some((line) => line.includes("worker.jsonl")));
+				assert.ok(compactLines.includes("worker.jsonl"));
 				for (const line of lines) assert.ok(visibleWidth(line) <= 100, `line exceeded width: ${line}`);
 				tui.terminal.rows = 10;
 				assert.ok(component.render(100).length <= 8, "short-terminal render should fit the overlay's 85% height cap");
@@ -222,10 +223,11 @@ describe("native subagent fleet", () => {
 				theme as never,
 				state,
 				() => {},
-				{ asyncDirRoot: root, resultsDir: path.join(root, "results"), refreshMs: 60_000, markdownTheme },
+				{ asyncDirRoot: root, resultsDir: path.join(root, "results"), refreshMs: 60_000, markdownTheme, now: () => 60_100 },
 			);
 			try {
 				let lines = component.render(100);
+				assert.ok(lines.some((line) => line.includes("1m0s")), "injected clock should make elapsed time deterministic");
 				assert.ok(lines.some((line) => line.includes("Conversation") && line.includes("assistant response")));
 				assert.ok(lines.some((line) => line.includes("const fleet = true;")));
 				assert.ok(!lines.some((line) => line.includes("very large tool payload")));

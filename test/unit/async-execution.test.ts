@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { buildAsyncRunnerSteps, formatAsyncStartedMessage, resolveAsyncRunnerLogPaths } from "../../src/runs/background/async-execution.ts";
+import { buildAsyncRunnerSteps, formatAsyncStartedMessage, readNestedTerminalStatus, resolveAsyncRunnerLogPaths } from "../../src/runs/background/async-execution.ts";
 import type { AgentConfig } from "../../src/agents/agents.ts";
 
 const agent = (name: string, toolBudget?: AgentConfig["toolBudget"]): AgentConfig => ({
@@ -47,6 +49,24 @@ describe("async runner execution", () => {
 
 	it("omits runner log paths when asyncDir is unavailable", () => {
 		assert.equal(resolveAsyncRunnerLogPaths({}), undefined);
+	});
+
+	it("does not invent a nested execution result when terminal status is unavailable", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-terminal-status-"));
+		const proof = { version: 1 as const, state: "observed" as const, runId: "child", runnerProcessInstanceId: "runner" };
+		try {
+			assert.equal(readNestedTerminalStatus(dir, "child", proof), undefined);
+			fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({ runId: "other", mode: "single", state: "complete", startedAt: 1 }));
+			assert.equal(readNestedTerminalStatus(dir, "child", proof), undefined);
+			fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({ runId: "child" }));
+			assert.equal(readNestedTerminalStatus(dir, "child", proof), undefined);
+			fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({ runId: "child", mode: "single", state: "running", startedAt: 1 }));
+			assert.equal(readNestedTerminalStatus(dir, "child", proof), undefined);
+			fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({ runId: "child", mode: "single", state: "failed", startedAt: 1 }));
+			assert.equal(readNestedTerminalStatus(dir, "child", proof)?.state, "failed");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("resolves async step tool budgets with step over run over agent over config precedence", () => {

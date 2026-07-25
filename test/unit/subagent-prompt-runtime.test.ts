@@ -17,7 +17,7 @@ import {
 	SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV,
 } from "../../src/runs/shared/pi-args.ts";
 import { STRUCTURED_OUTPUT_CAPTURE_ENV, STRUCTURED_OUTPUT_SCHEMA_ENV } from "../../src/runs/shared/structured-output.ts";
-import { TOOL_BUDGET_ENV } from "../../src/runs/shared/tool-budget.ts";
+import { TOOL_BUDGET_ENV, TOOL_BUDGET_OFFSET_ENV } from "../../src/runs/shared/tool-budget.ts";
 import { CHILD_TOOL_DIAGNOSTIC_PATH_ENV, readChildToolDiagnostic, REQUIRED_CHILD_TOOLS_ENV } from "../../src/runs/shared/tool-availability.ts";
 import { CHILD_WATCHDOG_CONFIG_ENV } from "../../src/watchdog/child-status.ts";
 import { SUBAGENT_WATCHDOG_WARNING_TYPE } from "../../src/watchdog/types.ts";
@@ -44,6 +44,7 @@ const envSnapshot = {
 	PI_SUBAGENT_STRUCTURED_OUTPUT_CAPTURE: process.env.PI_SUBAGENT_STRUCTURED_OUTPUT_CAPTURE,
 	PI_SUBAGENT_STRUCTURED_OUTPUT_SCHEMA: process.env.PI_SUBAGENT_STRUCTURED_OUTPUT_SCHEMA,
 	PI_SUBAGENT_TOOL_BUDGET: process.env.PI_SUBAGENT_TOOL_BUDGET,
+	PI_SUBAGENT_TOOL_BUDGET_OFFSET: process.env.PI_SUBAGENT_TOOL_BUDGET_OFFSET,
 	PI_SUBAGENT_REQUIRED_TOOLS: process.env.PI_SUBAGENT_REQUIRED_TOOLS,
 	PI_SUBAGENT_TOOL_DIAGNOSTIC_PATH: process.env.PI_SUBAGENT_TOOL_DIAGNOSTIC_PATH,
 	PI_SUBAGENT_ORCHESTRATOR_TARGET: process.env.PI_SUBAGENT_ORCHESTRATOR_TARGET,
@@ -99,6 +100,8 @@ afterEach(() => {
 	else process.env[STRUCTURED_OUTPUT_SCHEMA_ENV] = envSnapshot.PI_SUBAGENT_STRUCTURED_OUTPUT_SCHEMA;
 	if (envSnapshot.PI_SUBAGENT_TOOL_BUDGET === undefined) delete process.env[TOOL_BUDGET_ENV];
 	else process.env[TOOL_BUDGET_ENV] = envSnapshot.PI_SUBAGENT_TOOL_BUDGET;
+	if (envSnapshot.PI_SUBAGENT_TOOL_BUDGET_OFFSET === undefined) delete process.env[TOOL_BUDGET_OFFSET_ENV];
+	else process.env[TOOL_BUDGET_OFFSET_ENV] = envSnapshot.PI_SUBAGENT_TOOL_BUDGET_OFFSET;
 	if (envSnapshot.PI_SUBAGENT_REQUIRED_TOOLS === undefined) delete process.env[REQUIRED_CHILD_TOOLS_ENV];
 	else process.env[REQUIRED_CHILD_TOOLS_ENV] = envSnapshot.PI_SUBAGENT_REQUIRED_TOOLS;
 	if (envSnapshot.PI_SUBAGENT_TOOL_DIAGNOSTIC_PATH === undefined) delete process.env[CHILD_TOOL_DIAGNOSTIC_PATH_ENV];
@@ -154,6 +157,23 @@ describe("subagent prompt runtime", () => {
 			reason: "Tool budget hard limit reached after 3 tool calls (hard 2). The 'read' tool is blocked so you can finalize from the context you already have.",
 		});
 		assert.equal(toolCall({ toolName: "write" }), undefined);
+	});
+
+	it("starts tool-budget enforcement from an earlier model attempt offset", () => {
+		const handlers = new Map<string, (payload: { toolName?: string }) => unknown>();
+		process.env[TOOL_BUDGET_ENV] = JSON.stringify({ soft: 2, hard: 2, block: ["read"] });
+		process.env[TOOL_BUDGET_OFFSET_ENV] = "2";
+
+		registerSubagentPromptRuntime({
+			on(event: string, handler: (payload: { toolName?: string }) => unknown) {
+				handlers.set(event, handler);
+			},
+		} as { on(event: string, handler: (payload: { toolName?: string }) => unknown): void });
+
+		assert.deepEqual(handlers.get("tool_call")?.({ toolName: "read" }), {
+			block: true,
+			reason: "Tool budget hard limit reached after 3 tool calls (hard 2). The 'read' tool is blocked so you can finalize from the context you already have.",
+		});
 	});
 
 	it("registers the native canonical steering inbox path", () => {

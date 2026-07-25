@@ -101,10 +101,20 @@ describe("computePackageSourceSnapshot", () => {
 	});
 
 	it("matches the current npm pack file list as a release gate", () => {
-		const packed = spawnSync("npm", ["pack", "--dry-run", "--json"], { cwd: PACKAGE_ROOT, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 });
-		assert.equal(packed.status, 0, packed.stderr || packed.stdout);
-		const report = JSON.parse(packed.stdout) as Array<{ files: Array<{ path: string }> }>;
-		assert.deepEqual(listPackageSourceSnapshotFiles(PACKAGE_ROOT), report[0]!.files.map((entry) => entry.path).sort());
+		const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-doctor-npm-cache-"));
+		try {
+			const packed = spawnSync("npm", ["pack", "--dry-run", "--json"], {
+				cwd: PACKAGE_ROOT,
+				encoding: "utf-8",
+				env: { ...process.env, npm_config_cache: cacheDir },
+				maxBuffer: 10 * 1024 * 1024,
+			});
+			assert.equal(packed.status, 0, packed.stderr || packed.stdout);
+			const report = JSON.parse(packed.stdout) as Array<{ files: Array<{ path: string }> }>;
+			assert.deepEqual(listPackageSourceSnapshotFiles(PACKAGE_ROOT), report[0]!.files.map((entry) => entry.path).sort());
+		} finally {
+			fs.rmSync(cacheDir, { recursive: true, force: true });
+		}
 	});
 
 	it("rejects the file limit while collecting rather than after hashing", () => {

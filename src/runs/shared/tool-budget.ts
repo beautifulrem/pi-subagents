@@ -2,6 +2,7 @@ import type { ResolvedToolBudget, ToolBudgetConfig, ToolBudgetState } from "../.
 
 export const DEFAULT_TOOL_BUDGET_BLOCK = ["read", "grep", "find", "ls"] as const;
 export const TOOL_BUDGET_ENV = "PI_SUBAGENT_TOOL_BUDGET";
+export const TOOL_BUDGET_OFFSET_ENV = "PI_SUBAGENT_TOOL_BUDGET_OFFSET";
 export const TOOL_BUDGET_ZERO_AUTH_ENV = "PI_SUBAGENT_TOOL_BUDGET_ZERO_AUTH";
 
 export function normalizeToolBudgetBlock(block: ToolBudgetConfig["block"] | undefined): "*" | string[] {
@@ -77,4 +78,12 @@ export function decodeToolBudgetEnv(value: string | undefined, options: { allowZ
 	const normalized = validateToolBudgetConfig(parsed, TOOL_BUDGET_ENV, options.allowZero ? { minimumHard: 0 } : undefined);
 	if (normalized.error) throw new Error(normalized.error);
 	return normalized.budget;
+}
+
+export function decodeToolBudgetOffset(value: string | undefined): number {
+	if (!value) return 0;
+	if (!/^\d+$/.test(value)) throw new Error(`${TOOL_BUDGET_OFFSET_ENV} must be a non-negative integer.`);
+	const offset = Number(value);
+	if (!Number.isSafeInteger(offset)) throw new Error(`${TOOL_BUDGET_OFFSET_ENV} must be a safe integer.`);
+	return offset;
 }

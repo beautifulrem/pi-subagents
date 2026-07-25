@@ -593,21 +593,90 @@ describe("buildPiArgs system prompt mode wiring", () => {
 		assert.equal(env.MCP_DIRECT_TOOLS, "chrome-devtools");
 	});
 
-	it("preserves no --tools for MCP-only agents", () => {
-		const fixture = createMcpFixture();
-		writeMcpFixture(fixture);
-
-		const { args, env } = buildPiArgs({
+	it("emits --no-tools for explicit empty tool allowlists", () => {
+		const withoutSkills = buildPiArgs({
 			baseArgs: ["-p"],
 			task: "hello",
 			sessionEnabled: false,
 			inheritProjectContext: false,
 			inheritSkills: false,
-			mcpDirectTools: ["chrome-devtools"],
+			tools: [],
+		});
+		assert.ok(withoutSkills.args.includes("--no-tools"));
+		assert.equal(withoutSkills.args.includes("--tools"), false);
+
+		const withSkills = buildPiArgs({
+				baseArgs: ["-p"],
+				task: "hello",
+				sessionEnabled: false,
+				inheritProjectContext: false,
+				inheritSkills: false,
+				requireReadTool: true,
+				tools: [],
+		});
+		assert.equal(withSkills.args[withSkills.args.indexOf("--tools") + 1], "read");
+		assert.deepEqual(JSON.parse(withSkills.env[REQUIRED_CHILD_TOOLS_ENV] ?? "[]"), ["read"]);
+	});
+
+	it("preserves ambient builtins for MCP-only agents", () => {
+		for (const requireReadTool of [false, true]) {
+			const fixture = createMcpFixture();
+			writeMcpFixture(fixture);
+
+			const { args, env } = buildPiArgs({
+				baseArgs: ["-p"],
+				task: "hello",
+				sessionEnabled: false,
+				inheritProjectContext: false,
+				inheritSkills: false,
+				requireReadTool,
+				mcpDirectTools: ["chrome-devtools"],
+			});
+
+			assert.equal(args.includes("--tools"), false);
+			assert.equal(args.includes("--no-tools"), false);
+			assert.equal(env.MCP_DIRECT_TOOLS, "chrome-devtools");
+			assert.deepEqual(JSON.parse(env[REQUIRED_CHILD_TOOLS_ENV] ?? "[]"), ["chrome_devtools_take_screenshot", "chrome_devtools_click"]);
+		}
+	});
+
+	it("preserves ambient builtins when MCP-only names cannot be resolved", () => {
+		for (const requireReadTool of [false, true]) {
+			const fixture = createMcpFixture();
+			writeJson(path.join(fixture.agentDir, "mcp.json"), {
+				mcpServers: { "chrome-devtools": { command: "npx", args: ["chrome-devtools-mcp"] } },
+			});
+
+			const { args, env } = buildPiArgs({
+				baseArgs: ["-p"],
+				task: "hello",
+				sessionEnabled: false,
+				inheritProjectContext: false,
+				inheritSkills: false,
+				requireReadTool,
+				mcpDirectTools: ["chrome-devtools"],
+			});
+
+			assert.equal(args.includes("--no-tools"), false);
+			assert.equal(args.includes("--tools"), false);
+			assert.equal(env.MCP_DIRECT_TOOLS, "chrome-devtools");
+		}
+	});
+
+	it("preserves ambient builtins for path-only tool extensions needed alongside skills", () => {
+		const { args } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			inheritProjectContext: false,
+			inheritSkills: false,
+			requireReadTool: true,
+			tools: ["/tmp/custom-tools.ts"],
 		});
 
 		assert.equal(args.includes("--tools"), false);
-		assert.equal(env.MCP_DIRECT_TOOLS, "chrome-devtools");
+		assert.equal(args.includes("--no-tools"), false);
+		assert.ok(args.includes("/tmp/custom-tools.ts"));
 	});
 
 	it("supports direct MCP server/tool filters", () => {

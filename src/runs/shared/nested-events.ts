@@ -27,6 +27,7 @@ import {
 	SUBAGENT_PARENT_RUN_ID_ENV,
 } from "./pi-args.ts";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
+import { sanitizeProcessTerminal } from "../background/process-terminal.ts";
 
 export const NESTED_EVENTS_DIR = path.join(TEMP_ROOT_DIR, "nested-subagent-events");
 const ROUTE_FILE = "route.json";
@@ -245,6 +246,7 @@ function sanitizeStep(input: unknown, depth: number): NestedStepSummary | undefi
 		...(stringValue(raw.currentPath, 2048) ? { currentPath: stringValue(raw.currentPath, 2048) } : {}),
 		...(clampNumber(raw.turnCount) !== undefined ? { turnCount: clampNumber(raw.turnCount) } : {}),
 		...(clampNumber(raw.toolCount) !== undefined ? { toolCount: clampNumber(raw.toolCount) } : {}),
+		...(raw.usageIncomplete === true ? { usageIncomplete: true } : {}),
 		...(nonNegativeNumber(raw.runnableAt) !== undefined ? { runnableAt: nonNegativeNumber(raw.runnableAt) } : {}),
 		...(nonNegativeNumber(raw.queueDurationMs) !== undefined ? { queueDurationMs: nonNegativeNumber(raw.queueDurationMs) } : {}),
 		...(clampNumber(raw.startedAt) !== undefined ? { startedAt: clampNumber(raw.startedAt) } : {}),
@@ -855,6 +857,9 @@ export function nestedSummaryFromAsyncStatus(status: AsyncStatus, asyncDir: stri
 		...(status.pid ? { pid: status.pid } : {}),
 		...(status.sessionId ? { sessionId: status.sessionId } : {}),
 		mode: status.mode ?? fallback.mode,
+		...(status.capabilityCeiling ? { capabilityCeiling: status.capabilityCeiling } : {}),
+		...(status.capabilityAudit ? { capabilityAudit: status.capabilityAudit } : {}),
+		...(status.processTerminal ? { processTerminal: sanitizeProcessTerminal(status.processTerminal, { runId: status.runId || fallback.id, runnerProcessInstanceId: status.processTerminal.runnerProcessInstanceId }, `${asyncDir}/status.json`) } : {}),
 		state: status.state,
 		...(status.currentStep !== undefined ? { currentStep: status.currentStep } : {}),
 		...(status.chainStepCount !== undefined ? { chainStepCount: status.chainStepCount } : {}),
@@ -878,7 +883,7 @@ export function nestedSummaryFromAsyncStatus(status: AsyncStatus, asyncDir: stri
 		...(status.endedAt !== undefined ? { endedAt: status.endedAt } : {}),
 		lastUpdate: status.lastUpdate ?? fallback.ts,
 		...(status.sessionFile ? { sessionFile: status.sessionFile } : {}),
-		...(status.steps?.length ? { steps: status.steps.map((step) => ({
+		...(status.steps?.length ? { steps: status.steps.map((step, index) => ({
 			agent: step.agent,
 			status: step.status,
 			...(step.sessionFile ? { sessionFile: step.sessionFile } : {}),
@@ -889,6 +894,7 @@ export function nestedSummaryFromAsyncStatus(status: AsyncStatus, asyncDir: stri
 			...(step.currentPath ? { currentPath: step.currentPath } : {}),
 			...(step.turnCount !== undefined ? { turnCount: step.turnCount } : {}),
 			...(step.toolCount !== undefined ? { toolCount: step.toolCount } : {}),
+			...(step.usageIncomplete ? { usageIncomplete: true } : {}),
 			...(step.runnableAt !== undefined ? { runnableAt: step.runnableAt } : {}),
 			...(step.queueDurationMs !== undefined ? { queueDurationMs: step.queueDurationMs } : {}),
 			...(step.startedAt !== undefined ? { startedAt: step.startedAt } : {}),
@@ -899,6 +905,9 @@ export function nestedSummaryFromAsyncStatus(status: AsyncStatus, asyncDir: stri
 			...(step.turnBudget ? { turnBudget: step.turnBudget } : {}),
 			...(step.turnBudgetExceeded !== undefined ? { turnBudgetExceeded: step.turnBudgetExceeded } : {}),
 			...(step.wrapUpRequested !== undefined ? { wrapUpRequested: step.wrapUpRequested } : {}),
+			...(step.capabilityCeiling ? { capabilityCeiling: step.capabilityCeiling } : {}),
+			...(step.capabilityAudit ? { capabilityAudit: step.capabilityAudit } : {}),
+			...(step.processTerminal ? { processTerminal: sanitizeProcessTerminal(step.processTerminal, { runId: status.runId || fallback.id, runnerProcessInstanceId: step.processTerminal.runnerProcessInstanceId }, `${asyncDir}/status.json step ${index}`) } : {}),
 		})).slice(0, MAX_STEPS) } : {}),
 	};
 }

@@ -12,7 +12,7 @@ import {
 	writeChildToolDiagnostic,
 	type ChildToolDiagnostic,
 } from "./tool-availability.ts";
-import { TOOL_BUDGET_ENV, TOOL_BUDGET_ZERO_AUTH_ENV, decodeToolBudgetEnv, shouldBlockToolForBudget, toolBudgetBlockedMessage, toolBudgetSoftNudge } from "./tool-budget.ts";
+import { TOOL_BUDGET_ENV, TOOL_BUDGET_OFFSET_ENV, TOOL_BUDGET_ZERO_AUTH_ENV, decodeToolBudgetEnv, decodeToolBudgetOffset, shouldBlockToolForBudget, toolBudgetBlockedMessage, toolBudgetSoftNudge } from "./tool-budget.ts";
 import type { JsonSchemaObject, ResolvedToolBudget, SubagentState } from "../../shared/types.ts";
 import { resolveCurrentSessionId } from "../../shared/session-identity.ts";
 import { resolveWatchPath } from "../../shared/utils.ts";
@@ -200,9 +200,9 @@ export function formatSteerMessage(request: SteerRequest): string {
 	].join("\n");
 }
 
-function registerToolBudget(pi: ExtensionAPI, budget: ResolvedToolBudget | undefined): void {
+function registerToolBudget(pi: ExtensionAPI, budget: ResolvedToolBudget | undefined, initialToolCount = 0): void {
 	if (!budget) return;
-	let toolCount = 0;
+	let toolCount = initialToolCount;
 	let softNudged = false;
 	const sendUserMessage = (pi as { sendUserMessage?: (content: string, options: { deliverAs: "steer" }) => unknown }).sendUserMessage;
 	const onRuntimeEvent = pi.on as unknown as (event: string, handler: (event: { toolName?: string }) => unknown) => void;
@@ -335,7 +335,11 @@ export function registerSteeringInbox(
 
 export default function registerSubagentPromptRuntime(pi: ExtensionAPI): void {
 	registerSteeringInbox(pi);
-	registerToolBudget(pi, decodeToolBudgetEnv(process.env[TOOL_BUDGET_ENV], { allowZero: process.env[TOOL_BUDGET_ZERO_AUTH_ENV] === "1" }));
+	registerToolBudget(
+		pi,
+		decodeToolBudgetEnv(process.env[TOOL_BUDGET_ENV], { allowZero: process.env[TOOL_BUDGET_ZERO_AUTH_ENV] === "1" }),
+		decodeToolBudgetOffset(process.env[TOOL_BUDGET_OFFSET_ENV]),
+	);
 	registerChildWatchdog(pi);
 	const waitToolEnabled = resolveWaitToolConfig().enabled;
 	const waitState = {

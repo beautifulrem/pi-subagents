@@ -10,6 +10,7 @@
 
 import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { MockPi } from "../support/helpers.ts";
@@ -116,6 +117,7 @@ interface ChainExecutionResult {
 		};
 		currentStepIndex?: number;
 		outputs?: Record<string, { text: string; structured?: unknown }>;
+		parallelHandoff?: { version: number; path: string; groupCount: number; childCount: number; cleanupState: string };
 	};
 }
 
@@ -1460,6 +1462,12 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 		};
 	}
 
+	function git(args: string[]): string {
+		const result = spawnSync("git", args, { cwd: tempDir, encoding: "utf-8" });
+		assert.equal(result.status, 0, result.stderr || result.stdout);
+		return result.stdout.trim();
+	}
+
 	function readCallArgs(index: number): string[] {
 		const callFiles = fs.readdirSync(mockPi.dir)
 			.filter((name) => name.startsWith("call-") && name.endsWith(".json"))
@@ -1503,6 +1511,38 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
 		assert.match(summary, /=== Final task 1: reviewer-a ===/);
 		assert.match(summary, /=== Final task 2: reviewer-b ===/);
+	});
+
+	it("aggregates worktree handoffs across foreground chain groups", { skip: process.platform === "win32" ? "worktree paths differ on Windows" : undefined }, async () => {
+		git(["init"]);
+		git(["config", "user.email", "test@example.com"]);
+		git(["config", "user.name", "Test User"]);
+		fs.writeFileSync(path.join(tempDir, "tracked.txt"), "base\n", "utf-8");
+		git(["add", "tracked.txt"]);
+		git(["commit", "-m", "initial"]);
+		mockPi.onCall({ output: "Parallel task done" });
+		const runId = "foreground-chain-handoff";
+		const artifactsDir = path.join(tempDir, "artifacts");
+		const result = await executeChain(
+			makeChainParams(
+				[{ parallel: [{ agent: "reviewer-a", task: "Review in isolation" }], worktree: true }],
+				[makeAgent("reviewer-a")],
+				{ runId, artifactsDir },
+			),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details.parallelHandoff?.version, 1);
+		assert.equal(result.details.parallelHandoff?.childCount, 1);
+		assert.equal(result.details.parallelHandoff?.cleanupState, "complete");
+		const handoff = JSON.parse(fs.readFileSync(result.details.parallelHandoff!.path, "utf-8")) as {
+			groups: Array<{ stepIndex: number; children: Array<{ agent: string; patch: { path: string } }>; cleanup: { state: string } }>;
+		};
+		assert.equal(handoff.groups[0]!.stepIndex, 0);
+		assert.equal(handoff.groups[0]!.children[0]!.agent, "reviewer-a");
+		assert.equal(handoff.groups[0]!.cleanup.state, "complete");
+		assert.equal(fs.existsSync(handoff.groups[0]!.children[0]!.patch.path), true);
+		assert.match(handoff.groups[0]!.children[0]!.patch.path, /worktree-diffs\/foreground-chain-handoff\/step-0\//);
 	});
 
 	it("keeps static parallel output-save warnings visible in the terminal relay", async () => {

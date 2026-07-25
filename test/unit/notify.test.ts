@@ -388,6 +388,62 @@ describe("registerSubagentNotify", () => {
 });
 
 describe("completion formatting helpers", () => {
+	it("formats and parses a parallel handoff without folding it into the result preview", () => {
+		const content = formatSingleCompletion({
+			agent: "worker",
+			status: "completed",
+			resultPreview: "Done",
+			handoffPath: "/tmp/run/handoff.json",
+			sessionLabel: "Session file",
+			sessionValue: "/tmp/session.jsonl",
+		});
+		assert.equal(content, "Background task completed: **worker**\n\nDone\n\nParallel handoff: /tmp/run/handoff.json\n\nSession file: /tmp/session.jsonl");
+		assert.deepEqual(parseSubagentNotifyContent(content), {
+			agent: "worker",
+			status: "completed",
+			resultPreview: "Done",
+			handoffPath: "/tmp/run/handoff.json",
+			sessionLabel: "session file",
+			sessionValue: "/tmp/session.jsonl",
+		});
+		assert.equal(buildCompletionDetails({
+			id: "run",
+			agent: "worker",
+			success: true,
+			summary: "Done",
+			parallelHandoff: { version: 1, path: "/tmp/run/handoff.json", groupCount: 1, childCount: 1, changedPatches: 1, cleanupState: "complete" },
+		}).handoffPath, "/tmp/run/handoff.json");
+	});
+
+	it("round-trips result lines beginning with Parallel handoff before trailing metadata", () => {
+		const details: SubagentNotifyDetails = {
+			agent: "worker",
+			status: "completed",
+			resultPreview: [
+				"Checked the handoff contract.",
+				"Parallel handoff: this line is ordinary result text",
+				"The result continues after that line.",
+			].join("\n"),
+			handoffPath: "/tmp/run/actual-handoff.json",
+			sessionLabel: "Session file",
+			sessionValue: "/tmp/session.jsonl",
+		};
+
+		assert.deepEqual(parseSubagentNotifyContent(formatSingleCompletion(details)), {
+			...details,
+			sessionLabel: "session file",
+		});
+	});
+
+	it("attaches structured handoff details to a single completion", () => {
+		const { events, sent } = createPi("session-a");
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({
+			id: "notify-handoff",
+			parallelHandoff: { version: 1, path: "/tmp/run/handoff.json", groupCount: 1, childCount: 1, changedPatches: 1, cleanupState: "complete" },
+		}));
+		assert.equal((sent[0]?.message as { details?: SubagentNotifyDetails }).details?.handoffPath, "/tmp/run/handoff.json");
+	});
+
 	it("formatSingleCompletion mirrors the in-handler single message shape", () => {
 		const content = formatSingleCompletion({
 			agent: "worker",
@@ -439,8 +495,11 @@ describe("completion formatting helpers", () => {
 		notifier.dispose();
 	});
 
-	it("buildCompletionDetails derives paused status from state and summary", () => {
+	it("buildCompletionDetails preserves terminal lifecycle status", () => {
 		assert.equal(buildCompletionDetails({ id: "x", agent: "w", success: false, state: "paused", summary: "Paused after interrupt.", timestamp: 1 }).status, "paused");
+		const stopped = buildCompletionDetails({ id: "x", agent: "w", success: false, state: "stopped", summary: "Stopped by user.", timestamp: 1 });
+		assert.equal(stopped.status, "stopped");
+		assert.deepEqual(parseSubagentNotifyContent(formatSingleCompletion(stopped)), stopped);
 		assert.equal(buildCompletionDetails({ id: "x", agent: "w", success: false, summary: "boom", exitCode: 1, timestamp: 1 }).status, "failed");
 		assert.equal(buildCompletionDetails({ id: "x", agent: "w", success: true, summary: "ok", exitCode: 0, timestamp: 1 }).status, "completed");
 	});
