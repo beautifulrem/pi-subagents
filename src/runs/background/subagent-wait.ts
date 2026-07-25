@@ -299,6 +299,13 @@ function summarizeTerminalRuns(runs: AsyncRunSummary[], providerFinishedCount = 
 	return parts.join(", ");
 }
 
+function alreadyTerminalResult(requestedId: string, run: AsyncRunSummary, failOnFailedRuns: boolean): AgentToolResult<Details> {
+	return result(
+		`Target "${requestedId}" resolved to run "${run.id}", which already reached terminal state "${run.state}" before subagent_wait began. Nothing remains active for this target. Outcome: 1 ${run.state}. Completion may have raced with this wait; inspect with subagent({ action: "status", id: "${run.id}" }) for persisted output.`,
+		failOnFailedRuns && run.state === "failed",
+	);
+}
+
 function result(text: string, isError = false): AgentToolResult<Details> {
 	return {
 		content: [{ type: "text", text }],
@@ -468,10 +475,17 @@ export async function waitForSubagents(
 	const waitForAll = params.id ? true : params.all === true;
 
 	let active: AsyncRunSummary[];
+	let terminal: AsyncRunSummary[] = [];
 	let foreground: ForegroundResumeRun[];
 	let providerSnapshot: BackgroundWorkSnapshot;
 	try {
-		active = activeRunsForSession(params, deps);
+		if (params.id) {
+			const matchingRuns = allRunsForSession(params, deps);
+			active = matchingRuns.filter((run) => ACTIVE_STATES.includes(run.state));
+			terminal = matchingRuns.filter((run) => !ACTIVE_STATES.includes(run.state));
+		} else {
+			active = activeRunsForSession(params, deps);
+		}
 		foreground = activeDetachedForegroundRuns(params, deps);
 		providerSnapshot = params.id ? { providers: [], items: [] } : backgroundWorkForSession(deps, startedAt);
 	} catch (error) {
@@ -482,15 +496,19 @@ export async function waitForSubagents(
 		const candidates = [
 			...active.map((run) => ({ kind: "async" as const, id: run.id, run })),
 			...foreground.map((run) => ({ kind: "foreground" as const, id: run.runId, run })),
+			...terminal.map((run) => ({ kind: "terminal" as const, id: run.id, run })),
 		];
 		const exact = candidates.filter((candidate) => candidate.id === params.id);
 		const matches = exact.length > 0 ? exact : candidates;
 		if (matches.length > 1) {
-			return result(`Ambiguous subagent run id prefix "${params.id}" matched ${matches.length} active runs: ${matches.map((candidate) => candidate.id).join(", ")}. Pass a longer id.`, true);
+			return result(`Ambiguous subagent run id prefix "${params.id}" matched ${matches.length} current-session runs: ${matches.map((candidate) => candidate.id).join(", ")}. Pass a longer id.`, true);
 		}
 		const selected = matches[0];
 		if (selected?.kind === "foreground") {
 			return waitForDetachedForegroundRun(selected.run, signal, deps, startedAt, now, pollIntervalMs, timeoutMs);
+		}
+		if (selected?.kind === "terminal") {
+			return alreadyTerminalResult(params.id, selected.run, deps.failOnFailedRuns === true);
 		}
 		active = selected?.kind === "async" ? [selected.run] : [];
 	}

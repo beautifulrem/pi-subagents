@@ -109,6 +109,108 @@ describe("subagent_wait tool", () => {
 		}
 	});
 
+	it("returns a targeted terminal run immediately when completion wins the wait race", async () => {
+		for (const stateName of ["complete", "failed", "paused", "stopped"] as const) {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), `pi-wait-terminal-${stateName}-`));
+			try {
+				const asyncRoot = path.join(root, "runs");
+				const state = makeState("sess-1");
+				writeStatus(asyncRoot, `terminal-${stateName}`, stateName, { sessionId: "sess-1" });
+				let slept = false;
+				let subscribed = false;
+				const result = await waitForSubagents({ id: `terminal-${stateName}` }, undefined, baseDeps(root, state, {
+					sleep: async () => { slept = true; },
+					events: {
+						on: () => {
+							subscribed = true;
+							return () => {};
+						},
+					},
+				}));
+
+				assert.equal(result.isError, undefined);
+				const text = textOf(result);
+				assert.match(text, new RegExp(`resolved to run "terminal-${stateName}"`));
+				assert.match(text, new RegExp(`terminal state "${stateName}"`));
+				assert.match(text, new RegExp(`Outcome: 1 ${stateName}`));
+				assert.doesNotMatch(text, /No active run matched/);
+				assert.equal(slept, false, "an already-terminal target must not poll");
+				assert.equal(subscribed, false, "terminal fallback must not consume or re-emit completion events");
+
+				if (stateName === "failed") {
+					const drain = await waitForSubagents({ id: "terminal-failed" }, undefined, baseDeps(root, state, { failOnFailedRuns: true }));
+					assert.equal(drain.isError, true, "internal auto-drain keeps failed-run error semantics");
+				}
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		}
+	});
+
+	it("uses exact ids before prefix ambiguity across active, foreground, and terminal targets", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-terminal-ambiguity-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run", "complete", { sessionId: "sess-1" });
+			writeStatus(asyncRoot, "run-active", "running", { sessionId: "sess-1", pid: 999999 });
+			state.foregroundRuns = new Map([["run-foreground", {
+				runId: "run-foreground",
+				mode: "single",
+				cwd: root,
+				sessionId: "sess-1",
+				updatedAt: 1,
+				children: [{ agent: "worker", index: 0, status: "detached", updatedAt: 1 }],
+			}]]);
+
+			const exact = await waitForSubagents({ id: "run" }, undefined, baseDeps(root, state));
+			assert.equal(exact.isError, undefined);
+			assert.match(textOf(exact), /resolved to run "run".*terminal state "complete"/s);
+
+			const ambiguous = await waitForSubagents({ id: "ru" }, undefined, baseDeps(root, state));
+			assert.equal(ambiguous.isError, true);
+			assert.match(textOf(ambiguous), /matched 3 current-session runs/);
+			assert.match(textOf(ambiguous), /run-active/);
+			assert.match(textOf(ambiguous), /run-foreground/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps current-session terminal prefix fallback when a foreign exact id collides", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-terminal-session-prefix-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-al", "complete", { sessionId: "sess-2" });
+			writeStatus(asyncRoot, "run-alpha", "paused", { sessionId: "sess-1" });
+
+			const result = await waitForSubagents({ id: "run-al" }, undefined, baseDeps(root, state));
+			assert.equal(result.isError, undefined);
+			assert.match(textOf(result), /resolved to run "run-alpha".*terminal state "paused"/s);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not expose foreign or sessionless terminal targets", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-terminal-session-scope-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "foreign-terminal", "complete", { sessionId: "sess-2" });
+			writeStatus(asyncRoot, "sessionless-terminal", "failed");
+
+			for (const id of ["foreign-terminal", "sessionless-terminal"]) {
+				const result = await waitForSubagents({ id }, undefined, baseDeps(root, state));
+				assert.equal(result.isError, undefined);
+				assert.match(textOf(result), new RegExp(`No active run matched "${id}"`));
+			}
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("with all:true, resolves once every active run reaches a terminal state", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-resolve-"));
 		try {
