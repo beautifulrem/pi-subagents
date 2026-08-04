@@ -29,6 +29,58 @@ export interface RunnerCloseObservation {
 	signal: string | null;
 }
 
+export interface ProcessTerminalWriterResult {
+	stepIndex?: number;
+	writerProcesses?: ProcessInstanceExitV1[];
+	writerAttemptCount?: number;
+}
+
+export function buildProcessTerminalCandidate(input: {
+	runId: string;
+	runnerProcessInstanceId: string;
+	stepCount: number;
+	results: readonly ProcessTerminalWriterResult[];
+	sessionFile?: string;
+	revivalLeaseToken?: string;
+}): ProcessTerminalCandidate {
+	if (!Number.isInteger(input.stepCount) || input.stepCount < 0) throw new Error("Invalid process-terminal status step count.");
+	const writers: Record<string, ProcessInstanceExitV1[]> = {};
+	const expectedWriters: Record<string, number> = {};
+	for (let index = 0; index < input.stepCount; index++) {
+		writers[String(index)] = [];
+		expectedWriters[String(index)] = 0;
+	}
+	const claimedSteps = new Set<number>();
+	for (const result of input.results) {
+		if (result.stepIndex === undefined) {
+			if (result.writerProcesses !== undefined || result.writerAttemptCount !== undefined) {
+				throw new Error("Process-terminal writer evidence is missing a stable stepIndex.");
+			}
+			// Aggregate-only results do not represent a status step.
+			continue;
+		}
+		const index = result.stepIndex;
+		if (!Number.isInteger(index) || index < 0 || index >= input.stepCount) {
+			throw new Error(`Process-terminal writer stepIndex '${index}' is outside the status step range.`);
+		}
+		if (claimedSteps.has(index)) throw new Error(`Duplicate process-terminal writer result for status step '${index}'.`);
+		claimedSteps.add(index);
+		const expected = result.writerAttemptCount ?? 0;
+		if (!Number.isInteger(expected) || expected < 0) throw new Error(`Invalid expected writer count for status step '${index}'.`);
+		writers[String(index)] = result.writerProcesses ?? [];
+		expectedWriters[String(index)] = expected;
+	}
+	return {
+		version: 1,
+		runId: input.runId,
+		runnerProcessInstanceId: input.runnerProcessInstanceId,
+		writers,
+		expectedWriters,
+		...(input.sessionFile ? { sessionFile: input.sessionFile } : {}),
+		...(input.revivalLeaseToken ? { revivalLeaseToken: input.revivalLeaseToken } : {}),
+	};
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -183,10 +235,12 @@ function stepProcessTerminalProof(
 		runId: proof.runId,
 		childIndex,
 		runnerProcessInstanceId: proof.runnerProcessInstanceId,
+		instances: records,
 		...(resumeDispositionValue ? { resumeDisposition: resumeDispositionValue } : {}),
 	};
 	if (state === "observed") {
-		return { ...base, state, observedAt: proof.state === "observed" ? proof.observedAt : Date.now(), instances: records };
+		const rootRunner = proof.instances?.find((instance) => instance.kind === "runner" && instance.processInstanceId === proof.runnerProcessInstanceId);
+		return { ...base, state, observedAt: proof.state === "observed" ? proof.observedAt : Date.now(), instances: rootRunner ? [rootRunner, ...records] : records };
 	}
 	if (state === "unknown") {
 		return { ...base, state, reason: proof.state === "unknown" ? proof.reason : "writer-close-unverified" };

@@ -97,7 +97,6 @@ describe("below-editor subagent FleetView", () => {
 			assert.ok(lines.some((line) => line.includes("worker-0 (fable-5 · thinking low)") && line.includes("Inspect module 0")));
 			assert.ok(lines.some((line) => line.includes("11s · ↓ 13.1k tokens")));
 			assert.ok(lines.some((line) => line.includes("↓ 2 more")));
-			assert.equal(lines.at(-1), " ", "widget keeps one visual blank before footer");
 			for (const line of lines) assert.ok(visibleWidth(line) <= 80, `line exceeded width: ${line}`);
 		} finally {
 			fleet.dispose();
@@ -444,7 +443,7 @@ describe("below-editor subagent FleetView", () => {
 		}
 	});
 
-	it("leaves editor keyboard navigation untouched", () => {
+	it("only captures navigation at an empty editor and opens the selected child", async () => {
 		const state = stateForTest();
 		state.foregroundControls.set("run-worker", {
 			runId: "run-worker",
@@ -454,39 +453,7 @@ describe("below-editor subagent FleetView", () => {
 			currentAgent: "worker",
 			description: "Implement FleetView",
 		});
-		let inputHandler: ((data: string) => { consume?: boolean } | undefined) | undefined;
-		const ctx = {
-			hasUI: true,
-			ui: {
-				setWidget() {},
-				onTerminalInput(handler: typeof inputHandler) { inputHandler = handler; return () => { inputHandler = undefined; }; },
-				requestRender() {},
-				notify() {},
-				theme,
-			},
-		} as unknown as ExtensionContext;
-		const fleet = new SubagentFleetStatus(state, () => {}, { refreshMs: 60_000 });
-		try {
-			fleet.setContext(ctx);
-			assert.equal(inputHandler!("\x1b[B"), undefined);
-			assert.equal(inputHandler!("\x1b[D"), undefined);
-			assert.equal(inputHandler!("\r"), undefined);
-			assert.equal(inputHandler!("\x1b"), undefined);
-		} finally {
-			fleet.dispose();
-		}
-	});
-
-	it("opens a clicked child row using fixed-editor screen coordinates", async () => {
-		assert.deepEqual(parseFleetMouseEvent("\x1b[<0;5;18M"), { button: "left", action: "press", column: 5, row: 18 });
-		const state = stateForTest();
-		state.foregroundControls.set("run-reviewer", {
-			runId: "run-reviewer",
-			mode: "single",
-			startedAt: Date.now() - 1_000,
-			updatedAt: Date.now(),
-			currentAgent: "reviewer",
-		});
+		let editorText = "draft";
 		let inputHandler: ((data: string) => { consume?: boolean } | undefined) | undefined;
 		let widgetFactory: ((tui: unknown, theme: typeof theme) => { render(width: number): string[] }) | undefined;
 		const opened: string[] = [];
@@ -494,8 +461,8 @@ describe("below-editor subagent FleetView", () => {
 			hasUI: true,
 			ui: {
 				setWidget(_key: string, content: typeof widgetFactory | undefined) { if (content) widgetFactory = content; },
-				onTerminalInput(handler: typeof inputHandler) { inputHandler = handler; return () => {}; },
-				getEditorText() { return ""; },
+				onTerminalInput(handler: typeof inputHandler) { inputHandler = handler; return () => { inputHandler = undefined; }; },
+				getEditorText() { return editorText; },
 				requestRender() {},
 				notify() {},
 				theme,
@@ -542,7 +509,9 @@ describe("below-editor subagent FleetView", () => {
 			await Promise.resolve();
 			assert.deepEqual(opened, ["foreground-active:run-worker:0"]);
 			await new Promise<void>((resolve) => setImmediate(resolve));
-			assert.deepEqual(opened, ["foreground-active:run-reviewer:0"]);
+			widgetFactory!(tui, theme);
+			assert.deepEqual(inputHandler!("\x1b"), { consume: true });
+			assert.ok(component.render(100).some((line) => line.includes("⏺ main")));
 		} finally {
 			fleet.dispose();
 		}

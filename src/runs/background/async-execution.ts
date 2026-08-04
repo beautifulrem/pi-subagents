@@ -3,7 +3,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -12,6 +12,7 @@ import { createRequire } from "node:module";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../../agents/agents.ts";
 import { writePrivateAtomicJson } from "../../shared/atomic-json.ts";
+import { ensureArtifactsDir, openPrivateArtifactFile } from "../../shared/artifacts.ts";
 import { applyThinkingSuffix, projectLaunchResolvedChildExtensions, resolvePiLaunchToolPlan } from "../shared/pi-args.ts";
 import { injectOutputPathSystemPrompt, injectSingleOutputInstruction, normalizeSingleOutputOverride, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
 import { buildChainInstructions, isCheckpointStep, isDynamicParallelStep, isParallelStep, resolveStepBehavior, suppressProgressForReadOnlyTask, writeInitialProgressFile, type ChainStep, type ResolvedStepBehavior, type SequentialStep, type StepOverrides } from "../../shared/settings.ts";
@@ -61,7 +62,6 @@ import { usageBudgetState } from "../shared/usage-budget.ts";
 import type { ImportedAsyncRoot } from "./chain-root-attachment.ts";
 import type { SessionLeaseRequest } from "../shared/session-lease.ts";
 import { finalizeProcessTerminal, readProcessTerminal } from "./process-terminal.ts";
-import { SUBAGENT_PROCESS_TERMINAL_EVENT } from "../../shared/types.ts";
 import { assertAgentAllowedByCapabilityCeiling, decodeSubagentCapabilityCeiling, intersectSubagentCapabilityCeilings, resolveCurrentSubagentCapabilityCeiling, SUBAGENT_CAPABILITY_CEILING_ENV, type ResolvedSubagentCapabilityCeiling } from "../shared/capability-ceiling.ts";
 import { agentDefinitionDigest, launchBindingDigest } from "../../shared/launch-contract.ts";
 
@@ -455,6 +455,7 @@ function spawnRunner(cfg: object, suffix: string, cwd: string, onProcessTerminal
 	if (startupProceedPath) fs.rmSync(startupProceedPath, { force: true });
 
 	const logPaths = resolveAsyncRunnerLogPaths(launchConfig);
+	const controlEventCapability = randomBytes(32).toString("base64url");
 	let stdoutFd: number | undefined;
 	let stderrFd: number | undefined;
 	try {
@@ -566,6 +567,7 @@ function spawnRunner(cfg: object, suffix: string, cwd: string, onProcessTerminal
 	} catch (error) {
 		closeFd(stdoutFd);
 		closeFd(stderrFd);
+		
 		return { error: error instanceof Error ? error.message : String(error) };
 	}
 }
@@ -940,7 +942,7 @@ export function executeAsyncChain(
 		nestedRoute,
 	} = params;
 	const resultMode = params.resultMode ?? "chain";
-	const capabilityCeiling = params.capabilityCeiling ?? resolveCurrentSubagentCapabilityCeiling(ctx.currentSessionId);
+	const capabilityCeiling = intersectSubagentCapabilityCeilings(resolveCurrentSubagentCapabilityCeiling(ctx.parentSessionId ?? ctx.currentSessionId), params.capabilityCeiling);
 	const inheritedNestedRoute = resolveInheritedNestedRouteFromEnv();
 	const nestedAddress = inheritedNestedRoute ? resolveNestedParentAddressFromEnv() : undefined;
 	const asyncDir = inheritedNestedRoute
@@ -1201,7 +1203,7 @@ export function executeAsyncSingle(
 		nestedRoute,
 	} = params;
 	const task = params.task ?? "";
-	const capabilityCeiling = intersectSubagentCapabilityCeilings(params.capabilityCeiling ?? resolveCurrentSubagentCapabilityCeiling(ctx.currentSessionId), decodeSubagentCapabilityCeiling(process.env[SUBAGENT_CAPABILITY_CEILING_ENV]));
+	const capabilityCeiling = intersectSubagentCapabilityCeilings(resolveCurrentSubagentCapabilityCeiling(ctx.parentSessionId ?? ctx.currentSessionId), params.capabilityCeiling);
 	try {
 		assertAgentAllowedByCapabilityCeiling(agentConfig.name, capabilityCeiling);
 	} catch (error) {

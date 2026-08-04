@@ -317,7 +317,7 @@ async function runSingleAttempt(
 		tools: agent.tools,
 		extensions: agent.extensions,
 		subagentOnlyExtensions: agent.subagentOnlyExtensions,
-		systemPrompt: appendTurnBudgetSystemPrompt(shared.systemPrompt, options.turnBudget),
+		systemPrompt: appendTurnBudgetSystemPrompt(shared.systemPrompt, options.turnBudget, options.turnBudgetOffset),
 		mcpDirectTools: agent.mcpDirectTools,
 		cwd: options.cwd ?? runtimeCwd,
 		promptFileStem: agent.name,
@@ -333,6 +333,7 @@ async function runSingleAttempt(
 		parentSessionId: options.parentSessionId,
 		structuredOutput: options.structuredOutput,
 		toolBudget: options.toolBudget,
+		toolBudgetOffset: options.toolBudgetOffset,
 		allowZeroToolBudget: options.allowZeroToolBudget,
 		childWatchdog,
 		waitToolEnabled: options.waitToolEnabled,
@@ -460,50 +461,10 @@ async function runSingleAttempt(
 			// Missing/stale structured-output files are handled after the child exits.
 		}
 	}
-	const { args, env: sharedEnv, tempDir, toolDiagnosticPath, capabilityAudit } = buildPiArgs({
-		baseArgs: ["--mode", "json", "-p"],
-		task,
-		sessionEnabled: shared.sessionEnabled,
-		sessionDir: options.sessionDir,
-		sessionFile: options.sessionFile,
-		model: modelArg,
-		thinking: effectiveThinking,
-		systemPromptMode: agent.systemPromptMode,
-		inheritProjectContext: agent.inheritProjectContext,
-		inheritSkills: agent.inheritSkills,
-		requireReadTool: Boolean(shared.resolvedSkillNames?.length),
-		tools: agent.tools,
-		extensions: agent.extensions,
-		subagentOnlyExtensions: agent.subagentOnlyExtensions,
-		systemPrompt: appendTurnBudgetSystemPrompt(shared.systemPrompt, options.turnBudget, options.turnBudgetOffset),
-		mcpDirectTools: agent.mcpDirectTools,
-		cwd: options.cwd ?? runtimeCwd,
-		promptFileStem: agent.name,
-		intercomSessionName: options.intercomSessionName,
-		orchestratorIntercomTarget: options.orchestratorIntercomTarget,
-		runId: options.runId,
-		childAgentName: agent.name,
-		childIndex: options.index ?? 0,
-		parentEventSink: options.nestedRoute?.eventSink,
-		parentControlInbox: options.nestedRoute?.controlInbox,
-		parentRootRunId: options.nestedRoute?.rootRunId,
-		parentCapabilityToken: options.nestedRoute?.capabilityToken,
-		parentSessionId: options.parentSessionId,
-		structuredOutput: options.structuredOutput,
-		toolBudget: options.toolBudget,
-		toolBudgetOffset: options.toolBudgetOffset,
-		allowZeroToolBudget: options.allowZeroToolBudget,
-		childWatchdog,
-		waitToolEnabled: options.waitToolEnabled,
-		capabilityCeiling: options.capabilityCeiling,
-	});
-	if (capabilityAudit) {
-		result.capabilityCeiling = capabilityAudit.ceiling;
-		result.capabilityAudit = capabilityAudit;
-	}
 	const spawnEnv = { ...process.env, ...sharedEnv, ...getSubagentDepthEnv(options.maxSubagentDepth) };
 	let observedMutationAttempt = false;
 	let structuredOutputToolInvoked = false;
+	let usageIncomplete = false;
 
 	const exitCode = await new Promise<number>((resolve) => {
 		const spawnSpec = getPiSpawnCommand(args);
@@ -967,7 +928,7 @@ async function runSingleAttempt(
 					const terminalStructuredOutputCall = Boolean(options.structuredOutput)
 						&& toolCalls.length === 1
 						&& (toolCalls[0] as { name?: string }).name === "structured_output";
-					updateTurnBudget(result.usage.turns, terminalAssistantStop || terminalStructuredOutputCall, hasToolCall || Boolean(progress.currentTool));
+					updateTurnBudget(totalTurnCount, terminalAssistantStop || terminalStructuredOutputCall, hasToolCall || Boolean(progress.currentTool));
 					const u = evt.message.usage;
 					if (u) {
 						result.usage.input += u.input || 0;
@@ -978,7 +939,7 @@ async function runSingleAttempt(
 						progress.tokens = result.usage.input + result.usage.output;
 						progress.inputTokens = result.usage.input;
 						progress.outputTokens = result.usage.output;
-					}
+					} else usageIncomplete = true;
 					if (evt.message.model) {
 						progress.model = evt.message.model;
 						if (!result.model) result.model = evt.message.model;
@@ -1546,6 +1507,8 @@ async function runSyncCompletion(
 		const candidate = modelsToTry[modelIndex];
 		for (let startupAttemptIndex = 0; ; startupAttemptIndex++) {
 			const outputSnapshot = captureSingleOutputSnapshot(options.outputPath);
+			attemptOptions.turnBudgetOffset = aggregateUsage.turns;
+			attemptOptions.toolBudgetOffset = totalToolCount;
 			const result = await runSingleAttempt(runtimeCwd, agent, taskWithAcceptance, candidate, attemptOptions, {
 				sessionEnabled,
 				systemPrompt,
@@ -1567,6 +1530,7 @@ async function runSyncCompletion(
 				else if (candidate) attemptedModels.push(candidate);
 			}
 			sumUsage(aggregateUsage, result.usage);
+			if (result.usageIncomplete) usageIncomplete = true;
 			totalToolCount += result.progressSummary?.toolCount ?? 0;
 			totalDurationMs += result.progressSummary?.durationMs ?? 0;
 			const attemptSucceeded = result.exitCode === 0 && !result.error;
@@ -1575,7 +1539,7 @@ async function runSyncCompletion(
 				success: attemptSucceeded,
 				exitCode: result.exitCode,
 				error: result.error,
-				usage: { ...result.usage },
+				...(result.usageIncomplete ? {} : { usage: { ...result.usage } }),
 			};
 			modelAttempts.push(attempt);
 			// Preserve the legacy intercom handoff contract: once this logical run has

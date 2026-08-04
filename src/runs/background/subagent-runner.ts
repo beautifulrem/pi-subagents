@@ -81,7 +81,7 @@ import {
 	isRetryableSubagentStartupFailure,
 	waitForSubagentStartupRetry,
 } from "../shared/subagent-startup-retry.ts";
-import { markProcessTerminalCandidateLeaseRelease, writeProcessTerminalCandidate, type ProcessTerminalCandidate } from "./process-terminal.ts";
+import { buildProcessTerminalCandidate, markProcessTerminalCandidateLeaseRelease, writeProcessTerminalCandidate, type ProcessTerminalCandidate } from "./process-terminal.ts";
 import { createSteeringStatus, recordSteeringRequest, steeringStatus, terminalSteeringNoticeState, updateSteeringTarget } from "./steering.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
 import { detectSubagentError, extractTextFromContent, extractToolArgsPreview, getFinalOutput, hasEmptyTerminalAssistantResponse, readStatus } from "../../shared/utils.ts";
@@ -511,7 +511,6 @@ function runPiStreaming(
 		let turnBudgetMessage: string | undefined;
 		let turnBudget: TurnBudgetState | undefined;
 		let observedMutationAttempt = false;
-		let toolCount = 0;
 		const childWatchdogConfig = decodeChildWatchdogConfig(env?.[CHILD_WATCHDOG_CONFIG_ENV]);
 		let childWatchdogState: ChildWatchdogStateSnapshot | undefined;
 		let applyChildLifecycle = (_action: ChildLifecycleAction): void => {};
@@ -1195,6 +1194,8 @@ async function runSingleStep(
 	let capabilityAudit: import("../shared/capability-ceiling.ts").SubagentCapabilityAudit | undefined;
 	let launchResolvedExtensions = step.launchResolvedExtensions;
 	const modelAttempts: ModelAttempt[] = [];
+	let totalToolCount = 0;
+	let totalTurnCount = 0;
 	const writerProcesses: Array<{ processInstanceId: string; kind: "pi-writer"; attempt: number; closeObservedAt: number; exitCode: number | null; signal: string | null }> = [];
 	let writerAttemptCount = 0;
 	const attemptNotes: string[] = [];
@@ -1331,6 +1332,8 @@ async function runSingleStep(
 				signal: run.processSignal ?? null,
 			});
 		}
+		totalToolCount += run.toolCount;
+		totalTurnCount += run.usage.turns;
 		if (run.turnBudget) turnBudget = run.turnBudget;
 		else if (ctx.turnBudget) {
 			const assistantMessages = run.messages.filter((message) => message.role === "assistant");
@@ -1606,9 +1609,7 @@ async function runSingleStep(
 					transcriptError: transcriptWriter?.getError(),
 					skills: step.skills,
 					timestamp: Date.now(),
-				}, null, 2),
-				"utf-8",
-			);
+			});
 		}
 	}
 
@@ -2012,7 +2013,7 @@ async function runSubagent(
 	};
 
 	fs.mkdirSync(asyncDir, { recursive: true });
-	writeAtomicJson(statusPath, statusPayload);
+	writePrivateAtomicJson(statusPath, statusPayload);
 	let pendingParallelUsageCost: CostSummary = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
 	const currentUsageTotals = (): CostSummary => {
 		const cost = results.reduce<CostSummary>((sum, result) => ({
@@ -2055,11 +2056,13 @@ async function runSubagent(
 	const refreshWorkflowGraph = (): void => {
 		if (!config.workflowGraph) return;
 		const graph = structuredClone(statusPayload.workflowGraph ?? config.workflowGraph);
+		delete graph.currentNodeId;
 		const normalize = (status: RunnerStatusStep["status"]): "pending" | "running" | "completed" | "failed" | "paused" | "stopped" | "detached" | "rejected" => {
 			if (status === "complete" || status === "completed") return "completed";
 			if (status === "running" || status === "failed" || status === "paused" || status === "stopped" || status === "pending" || status === "rejected") return status;
 			return "pending";
 		};
+		const hasCurrentNode = statusPayload.state === "queued" || statusPayload.state === "running" || statusPayload.state === "paused";
 		const updateNode = (node: NonNullable<typeof graph.nodes>[number]): void => {
 			if (node.flatIndex !== undefined) {
 				const step = statusPayload.steps[node.flatIndex];
@@ -4122,6 +4125,8 @@ async function runSubagent(
 				wrapUpRequested: singleResult.wrapUpRequested,
 				toolBudget: singleResult.toolBudget,
 				toolBudgetBlocked: singleResult.toolBudgetBlocked,
+				writerProcesses: singleResult.writerProcesses,
+				writerAttemptCount: singleResult.writerAttemptCount,
 			});
 			if (seqStep.outputName) {
 				outputs[seqStep.outputName] = outputEntryFromAsyncResult({
@@ -4498,22 +4503,15 @@ async function runSubagent(
 		console.error(`Failed to write result file ${resultPath}:`, err);
 	}
 	if (config.runnerProcessInstanceId) {
-		const writers: Record<string, Array<{ processInstanceId: string; kind: "pi-writer"; attempt: number; closeObservedAt: number; exitCode: number | null; signal: string | null }>> = {};
-		const expectedWriters: Record<string, number> = {};
-		for (const [index, result] of results.entries()) {
-			writers[String(index)] = result.writerProcesses ?? [];
-			expectedWriters[String(index)] = result.writerAttemptCount ?? 0;
-		}
-		const candidate: ProcessTerminalCandidate = {
-			version: 1,
-			runId: id,
-			runnerProcessInstanceId: config.runnerProcessInstanceId,
-			writers,
-			expectedWriters,
-			...(config.revivalLease?.sessionFile ? { sessionFile: config.revivalLease.sessionFile } : {}),
-			...(config.revivalLeaseToken ? { revivalLeaseToken: config.revivalLeaseToken } : {}),
-		};
 		try {
+			const candidate = buildProcessTerminalCandidate({
+				runId: id,
+				runnerProcessInstanceId: config.runnerProcessInstanceId,
+				stepCount: statusPayload.steps.length,
+				results,
+				...(config.revivalLease?.sessionFile ? { sessionFile: config.revivalLease.sessionFile } : {}),
+				...(config.revivalLeaseToken ? { revivalLeaseToken: config.revivalLeaseToken } : {}),
+			});
 			writeProcessTerminalCandidate(asyncDir, candidate);
 		} catch (error) {
 			console.error(`Failed to write process-terminal candidate for '${id}':`, error);
@@ -4563,7 +4561,7 @@ async function runConfiguredSubagent(config: SubagentRunConfig): Promise<void> {
 		if (config.revivalLease) {
 			lease = acquireSessionLease(config.revivalLease);
 			config.revivalLeaseToken = lease.owner.token;
-			writeAtomicJson(startupPath, { state: "ready", token: lease.owner.token, pid: process.pid, owner: lease.owner });
+			writePrivateAtomicJson(startupPath, { state: "ready", token: lease.owner.token, pid: process.pid, owner: lease.owner });
 			await waitForStartupControl(startupAckPath, lease.owner.token, "ack");
 			writePrivateAtomicJson(startupPath, { state: "acknowledged", token: lease.owner.token, pid: process.pid });
 			await waitForStartupControl(startupProceedPath, lease.owner.token, "proceed");

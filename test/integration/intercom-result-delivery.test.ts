@@ -143,7 +143,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		}
 	}
 
-	function makeExecutor(options: { bridgeMode?: "always" | "off"; resultDelivery?: boolean; agents?: ReturnType<typeof makeAgent>[]; acknowledgeResults?: boolean; kill?: (pid: number, signal?: NodeJS.Signals | 0) => boolean } = {}) {
+	function makeExecutor(options: { bridgeMode?: "always" | "off"; resultDelivery?: boolean; omitResultIntercom?: boolean; agents?: ReturnType<typeof makeAgent>[]; acknowledgeResults?: boolean; kill?: (pid: number, signal?: NodeJS.Signals | 0) => boolean } = {}) {
 		const events = createRecordingEventBus({ acknowledgeResults: options.acknowledgeResults ?? true });
 		const state = {
 			baseCwd: tempDir,
@@ -175,6 +175,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 					mode: options.bridgeMode ?? "always",
 					...(options.resultDelivery === undefined ? {} : { resultDelivery: options.resultDelivery }),
 				},
+				...(options.omitResultIntercom ? {} : { resultIntercom: true }),
 			},
 			asyncByDefault: false,
 			tempArtifactsDir: tempDir,

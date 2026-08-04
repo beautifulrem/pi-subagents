@@ -2,7 +2,7 @@
 
 `pi-subagents` lets Pi delegate work to focused child agents. Use it for code review, scouting, implementation, parallel audits, saved workflows, background jobs, and anything else that benefits from a second or third set of model eyes.
 
-<https://github.com/user-attachments/assets/702554ec-faaf-4635-80aa-fb5d6e292fd1>
+## Local installation
 
 This checkout is a private, local-only Pi harness. Pi loads it through the
 `local-packages/pi-subagents` entry in `~/.pi/agent/settings.json`.

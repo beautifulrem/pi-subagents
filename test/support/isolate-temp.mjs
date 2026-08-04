@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const base = process.env.PI_SUBAGENT_TEST_TMP_BASE ?? (process.platform === "win32" ? os.tmpdir() : "/tmp");
+const base = process.env.PI_SUBAGENT_TEST_TMP_BASE ?? os.tmpdir();
 const root = fs.mkdtempSync(path.join(base, "pi-st-"));
 
 process.env.PI_SUBAGENT_TEST_TMP_BASE = base;

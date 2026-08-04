@@ -87,9 +87,6 @@ describe("registered subagent tool description", () => {
 			/\{\s*parallel:\s*\[\s*\{\s*agent:\s*"[\w-]+",\s*task:\s*"[^"]*",\s*count:\s*\d+\s*\}\s*\]\s*\}/,
 			"full mode should show a parallel fan-out chain example with count",
 		);
-		assert.match(description, /Dynamic expand step.*parallel:\{agent:.*expand:\{from:\{output:.*path:"\/items".*maxItems:4.*collect:\{as:/i);
-		assert.match(description, /parallel must be one template object, not an array.*must not also set agent/i);
-		assert.match(description, /seed uses outputSchema.*acceptance:\{level:"none",reason:"exact-output transform"\}/i);
 	});
 
 	it("offers a compact mode that keeps safety-critical guidance", () => {

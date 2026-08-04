@@ -110,8 +110,10 @@ describe("computePackageSourceSnapshot", () => {
 				maxBuffer: 10 * 1024 * 1024,
 			});
 			assert.equal(packed.status, 0, packed.stderr || packed.stdout);
-			const report = JSON.parse(packed.stdout) as Array<{ files: Array<{ path: string }> }>;
-			assert.deepEqual(listPackageSourceSnapshotFiles(PACKAGE_ROOT), report[0]!.files.map((entry) => entry.path).sort());
+			const parsed = JSON.parse(packed.stdout) as Array<{ files: Array<{ path: string }> }> | Record<string, { files: Array<{ path: string }> }>;
+			const report = Array.isArray(parsed) ? parsed[0] : parsed["pi-subagents"];
+			assert.ok(report, "npm pack --dry-run --json should report the packed file list");
+			assert.deepEqual(listPackageSourceSnapshotFiles(PACKAGE_ROOT), report!.files.map((entry) => entry.path).sort());
 		} finally {
 			fs.rmSync(cacheDir, { recursive: true, force: true });
 		}

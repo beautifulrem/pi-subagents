@@ -4,7 +4,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolveAgentName, type AgentConfig, type AgentScope } from "../../agents/agents.ts";
-import { getArtifactsDir, getProjectChainRunsDir } from "../../shared/artifacts.ts";
+import { getArtifactsDir, getChainRunsDir, getProjectChainRunsDir } from "../../shared/artifacts.ts";
 import { ChainClarifyComponent, type ChainClarifyResult } from "./chain-clarify.ts";
 import { resolveEffectiveThinking, toModelInfo, type ModelInfo } from "../../shared/model-info.ts";
 import { executeChain } from "./chain-execution.ts";
@@ -928,7 +928,7 @@ function appendStepToAsyncChain(input: {
 		contextForAgent: contextPolicy.contextForAgent,
 		asyncDir: resolved.location.asyncDir,
 		validateOutputBindings: false,
-		capabilityCeiling: intersectSubagentCapabilityCeilings(status.capabilityCeiling, resolveCurrentSubagentCapabilityCeiling(asyncCtx.currentSessionId)),
+		capabilityCeiling: intersectSubagentCapabilityCeilings(status.capabilityCeiling, resolveCurrentSubagentCapabilityCeiling(asyncCtx.parentSessionId ?? asyncCtx.currentSessionId)),
 	});
 	if ("error" in built) {
 		return {
@@ -1338,7 +1338,7 @@ async function resumeAsyncRun(input: {
 			controlIntercomTarget: intercomBridge.active ? intercomBridge.orchestratorTarget : undefined,
 			childIntercomTarget: intercomBridge.active ? (agent, index) => resolveSubagentIntercomTarget(runId, agent, index) : undefined,
 			globalConcurrencyLimit: input.deps.config.globalConcurrencyLimit,
-			capabilityCeiling: intersectSubagentCapabilityCeilings("capabilityCeiling" in target ? target.capabilityCeiling : undefined, resolveCurrentSubagentCapabilityCeiling(input.deps.state.currentSessionId)),
+			capabilityCeiling: intersectSubagentCapabilityCeilings("capabilityCeiling" in target ? target.capabilityCeiling : undefined, resolveCurrentSubagentCapabilityCeiling(input.ctx.sessionManager.getSessionId() ?? input.deps.state.currentSessionId)),
 		});
 		if (result.isError) return result;
 		const attachedId = result.details.asyncId ?? runId;
@@ -1409,7 +1409,7 @@ async function resumeAsyncRun(input: {
 		...(input.absoluteDeadlineAt !== undefined ? { absoluteDeadlineAt: input.absoluteDeadlineAt } : {}),
 		...(input.params.turnBudget !== undefined ? { turnBudget: input.params.turnBudget } : {}),
 		...(input.params.toolBudget !== undefined ? { toolBudget: input.params.toolBudget } : {}),
-		capabilityCeiling: intersectSubagentCapabilityCeilings("capabilityCeiling" in target ? target.capabilityCeiling : undefined, recoveryDescriptor?.capabilityCeiling, resolveCurrentSubagentCapabilityCeiling(input.deps.state.currentSessionId)),
+		capabilityCeiling: intersectSubagentCapabilityCeilings("capabilityCeiling" in target ? target.capabilityCeiling : undefined, recoveryDescriptor?.capabilityCeiling, resolveCurrentSubagentCapabilityCeiling(input.ctx.sessionManager.getSessionId() ?? input.deps.state.currentSessionId)),
 	});
 	if (result.isError) return result;
 
@@ -2774,6 +2774,17 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 					return true;
 				},
 			});
+		}
+		if (input.signal?.aborted) {
+			return {
+				index: input.globalTaskIndex + index,
+				agent: task.agent,
+				task: taskText,
+				exitCode: 1,
+				messages: [],
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
+				error: "Subagent execution cancelled before launch",
+			} as SingleResult;
 		}
 		const structuredRuntime = task.outputSchema
 			? createStructuredOutputRuntime(task.outputSchema, path.join(input.artifactsDir, "structured-output", input.runId))
@@ -4335,7 +4346,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			modelScope,
 			parentModel: requestParentModel,
 			parentSessionId: deps.state.currentSessionId,
-			capabilityCeiling: resolveCurrentSubagentCapabilityCeiling(deps.state.currentSessionId ?? undefined),
+			capabilityCeiling: resolveCurrentSubagentCapabilityCeiling(ctx.sessionManager.getSessionId() ?? deps.state.currentSessionId ?? undefined),
 		};
 
 		const foregroundDescription = effectiveParams.task?.trim()

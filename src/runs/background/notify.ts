@@ -111,12 +111,13 @@ export function parseSubagentNotifyContent(content: string): SubagentNotifyDetai
 	const match = (lines[0] ?? "").match(/^(Background task|Detached foreground task) (completed|failed|paused|stopped): \*\*(.+?)\*\*(?:\s+(\([^)]*\)))?$/);
 	if (!match) return undefined;
 	const body = lines.slice(2);
-	let resultEnd = body.length;
-	const sessionIndex = resultEnd >= 2
-		&& body[resultEnd - 2]?.trim() === ""
-		&& /^(Session|Session file|Session share error):\s+/.test(body[resultEnd - 1]!)
-		? resultEnd - 1
-		: -1;
+	let sessionIndex = -1;
+	for (let i = body.length - 1; i >= 1; i--) {
+		if (body[i - 1]?.trim() === "" && /^(Session|Session file|Session share error):\s+/.test(body[i]!)) {
+			sessionIndex = i;
+			break;
+		}
+	}
 	const sessionLine = sessionIndex >= 0 ? body[sessionIndex] : undefined;
 	const handoffIndex = body.findIndex((line) => line.startsWith("Parallel handoff: "));
 	const metadataIndexes = [sessionIndex, handoffIndex].filter((index) => index >= 0);

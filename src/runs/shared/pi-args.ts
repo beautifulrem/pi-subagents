@@ -10,7 +10,7 @@ import { RUNTIME_EXTENSION_ACK_PATH_ENV } from "./runtime-acknowledged-extension
 import { STRUCTURED_OUTPUT_CAPTURE_ENV, STRUCTURED_OUTPUT_SCHEMA_ENV } from "./structured-output.ts";
 import { TEMP_ROOT_DIR, type JsonSchemaObject, type LaunchResolvedChildExtensionsV1, type ResolvedToolBudget } from "../../shared/types.ts";
 import { THINKING_LEVELS } from "../../shared/model-info.ts";
-import { TOOL_BUDGET_ENV, TOOL_BUDGET_ZERO_AUTH_ENV, encodeToolBudgetEnv } from "./tool-budget.ts";
+import { TOOL_BUDGET_ENV, TOOL_BUDGET_OFFSET_ENV, TOOL_BUDGET_ZERO_AUTH_ENV, encodeToolBudgetEnv } from "./tool-budget.ts";
 import { CHILD_TOOL_DIAGNOSTIC_PATH_ENV, MCP_DIRECT_CHILD_TOOLS_ENV, REQUIRED_CHILD_TOOLS_ENV } from "./tool-availability.ts";
 import { CHILD_WATCHDOG_CONFIG_ENV, encodeChildWatchdogConfig, type ChildWatchdogConfig } from "../../watchdog/child-status.ts";
 import { WAIT_TOOL_ENABLED_ENV } from "../background/wait-config.ts";

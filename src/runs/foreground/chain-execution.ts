@@ -43,6 +43,7 @@ import {
 } from "./foreground-control.ts";
 import { buildChainSummary } from "../../shared/formatters.ts";
 import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, mergeResultWarnings, resolveChildCwd, sumResultsCost, sumResultsUsage } from "../../shared/utils.ts";
+import { writePrivateAtomicJson } from "../../shared/atomic-json.ts";
 import { DEFAULT_GLOBAL_CONCURRENCY_LIMIT, Semaphore } from "../shared/parallel-utils.ts";
 import { formatParallelHandoffError, formatParallelHandoffReference, parallelHandoffPath, writeParallelHandoffGroup } from "../shared/parallel-handoff.ts";
 import { recordRun } from "../shared/run-history.ts";
@@ -73,6 +74,7 @@ import {
 	type ToolBudgetConfig,
 	type ChainCheckpointState,
 	type UsageBudgetConfig,
+	DEFAULT_MAX_OUTPUT,
 	MAX_CONCURRENCY,
 	resolveChildMaxSubagentDepth,
 	truncateOutput,
@@ -373,6 +375,18 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 						return true;
 					},
 				});
+			}
+
+			if (input.signal?.aborted) {
+				return {
+					index: childIndex,
+					agent: task.agent,
+					task: cleanTask,
+					exitCode: 1,
+					messages: [],
+					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
+					error: "Subagent execution cancelled before launch",
+				} as SingleResult;
 			}
 
 			const structuredRuntime = task.outputSchema

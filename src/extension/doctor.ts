@@ -100,7 +100,7 @@ const DEFAULT_DEPS: DoctorDeps = {
 
 const EXTENSION_MODULE_PATH = fileURLToPath(import.meta.url);
 const PACKAGE_ROOT = path.resolve(path.dirname(EXTENSION_MODULE_PATH), "../..");
-const SNAPSHOT_ROOT_FILES = ["package.json", "index.ts", "README.md", "CHANGELOG.md"];
+const SNAPSHOT_ROOT_FILES = ["package.json", "index.ts", "README.md", "CHANGELOG.md", "LICENSE"];
 const SNAPSHOT_DIRECTORIES = ["src", "agents", "skills", "prompts"];
 const SNAPSHOT_MAX_FILES = 5_000;
 const SNAPSHOT_MAX_ENTRIES = 10_000;
