@@ -18,7 +18,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { keyText, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Box, Container, Spacer, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
+import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { discoverAgents } from "../agents/agents.ts";
 import { cleanupAllArtifactDirs, cleanupOldArtifacts, ensureArtifactsDir, getArtifactsDir } from "../shared/artifacts.ts";
 import { resolveCurrentSessionId } from "../shared/session-identity.ts";
@@ -142,34 +142,6 @@ function createSlashResultComponent(
 	return container;
 }
 
-class SubagentControlNoticeComponent implements Component {
-	constructor(
-		private readonly details: SubagentControlMessageDetails,
-		private readonly theme: ExtensionContext["ui"]["theme"],
-	) {}
-
-	invalidate(): void {}
-
-	render(width: number): string[] {
-		const eventLabel = this.details.event.type.replaceAll("_", " ");
-		if (width < 3) return [truncateToWidth(`Subagent ${eventLabel}`, width)];
-		const bodyWidth = Math.max(1, width - 2);
-		const borderChar = "─";
-		const header = ` ⚠ Subagent ${eventLabel}: ${this.details.event.agent} `;
-		const headerText = truncateToWidth(header, bodyWidth, "");
-		const headerPadding = Math.max(0, bodyWidth - visibleWidth(headerText));
-		const lines = [this.theme.fg("accent", `╭${headerText}${borderChar.repeat(headerPadding)}╮`)];
-
-		for (const line of wrapTextWithAnsi(formatSubagentControlNotice(this.details), bodyWidth)) {
-			const text = truncateToWidth(line, bodyWidth, "");
-			const padding = Math.max(0, bodyWidth - visibleWidth(text));
-			lines.push(this.theme.fg("accent", `│${text}${" ".repeat(padding)}│`));
-		}
-		lines.push(this.theme.fg("accent", `╰${borderChar.repeat(bodyWidth)}╯`));
-		return lines;
-	}
-}
-
 export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	if (process.env[SUBAGENT_CHILD_ENV] === "1") {
 		return;
@@ -188,7 +160,17 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	ensureArtifactsDir(TEMP_ROOT_DIR);
 	ensureArtifactsDir(RESULTS_DIR);
 	ensureArtifactsDir(ASYNC_DIR);
-	cleanupOldChainDirs();
+	// Disk cleanup is best-effort housekeeping — never block extension registration.
+	let housekeepingTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+		housekeepingTimer = undefined;
+		try {
+			cleanupOldChainDirs();
+			cleanupAllArtifactDirs(DEFAULT_ARTIFACT_CONFIG.cleanupDays);
+		} catch {
+			// ignore
+		}
+	}, 0);
+	housekeepingTimer.unref?.();
 
 	const config = loadConfig();
 	const waitToolConfig = resolveWaitToolConfig(config.waitTool);
@@ -196,7 +178,6 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	const fleetViewEnabled = config.fleetView !== false;
 	const asyncWidgetEnabled = config.asyncWidget === true || (!fleetViewEnabled && config.asyncWidget !== false);
 	const tempArtifactsDir = getArtifactsDir(null);
-	cleanupAllArtifactDirs(DEFAULT_ARTIFACT_CONFIG.cleanupDays);
 
 	const state: SubagentState = {
 		baseCwd: "",
@@ -230,6 +211,16 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	};
 
 	const supervisorChannel = createNativeSupervisorChannel(pi, state);
+	let resultStartupTimer: ReturnType<typeof setTimeout> | undefined;
+	let supervisorStartupTimer: ReturnType<typeof setTimeout> | undefined;
+	const clearDeferredSessionStart = () => {
+		if (housekeepingTimer) clearTimeout(housekeepingTimer);
+		housekeepingTimer = undefined;
+		if (resultStartupTimer) clearTimeout(resultStartupTimer);
+		if (supervisorStartupTimer) clearTimeout(supervisorStartupTimer);
+		resultStartupTimer = undefined;
+		supervisorStartupTimer = undefined;
+	};
 	const mainWatchdog = registerMainWatchdog(pi);
 	const completionNotifier = registerSubagentNotify(pi, state, { batchConfig: config.completionBatch });
 	const fleetStatus = fleetViewEnabled
@@ -248,8 +239,10 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	);
 
 	const runtimeCleanup = () => {
+		clearDeferredSessionStart();
 		stopResultWatcher();
 		state.currentSessionId = null;
+		state.lastUiContext = null;
 		completionNotifier.dispose();
 		mainWatchdog.dispose();
 		scheduledRunManager.stop();
@@ -352,11 +345,20 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		return new Text(theme.fg(details.state === "recovered" ? "warning" : "error", formatSteeringNotice(details)), 0, 0);
 	});
 
-	pi.registerMessageRenderer<SubagentControlMessageDetails>(SUBAGENT_CONTROL_MESSAGE_TYPE, (message, _options, theme) => {
+	pi.registerMessageRenderer<SubagentControlMessageDetails>(SUBAGENT_CONTROL_MESSAGE_TYPE, (message, { outputPad }, theme) => {
 		const details = message.details as SubagentControlMessageDetails | undefined;
 		if (!details?.event) return undefined;
 		const content = typeof message.content === "string" ? message.content : undefined;
-		return new SubagentControlNoticeComponent({ ...details, noticeText: formatSubagentControlNotice(details, content) }, theme);
+		const [title = "Subagent needs attention", ...body] = formatSubagentControlNotice(details, content).split("\n");
+		const notice = new Container();
+		notice.addChild(new Text(`${theme.fg("warning", "⚠")} ${theme.bold(title)}`, 0, 0));
+		if (body.length > 0) {
+			notice.addChild(new Spacer(1));
+			notice.addChild(new Text(theme.fg("dim", body.join("\n")), 0, 0));
+		}
+		const box = new Box(outputPad, 1, (text: string) => theme.bg("toolErrorBg", text));
+		box.addChild(notice);
+		return box;
 	});
 
 	const executeSubagentCollapsed = (id: string, params: SubagentParamsLike, signal: AbortSignal, onUpdate: ((result: AgentToolResult<Details>) => void) | undefined, ctx: ExtensionContext) => {
@@ -552,27 +554,42 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 			}
 		}
 		state.lastUiContext = ctx;
-		cleanupSessionArtifacts(ctx);
 		clearPendingForegroundControlNotices(state);
 		resetJobs(ctx);
 		restoreActiveJobs(ctx);
 		scheduledRunManager.bindSession(ctx);
 		restoreSlashFinalSnapshots(ctx.sessionManager.getEntries());
-		startResultWatcher();
-		primeExistingResults({ triggerTurn: !recovering });
 		fleetStatus?.setContext(ctx);
+		// Watcher + artifact GC after first paint — still full fidelity for async jobs.
+		resultStartupTimer = setTimeout(() => {
+			resultStartupTimer = undefined;
+			if (state.lastUiContext !== ctx) return;
+			cleanupSessionArtifacts(ctx);
+			startResultWatcher();
+			primeExistingResults({ triggerTurn: !recovering });
+		}, 0);
+		resultStartupTimer.unref?.();
 	};
 
 	pi.on("session_start", (event, ctx) => {
+		clearDeferredSessionStart();
 		const recovering = event.reason === "startup" || event.reason === "reload" || event.reason === "resume";
 		resetSessionState(ctx, recovering);
 		rpcBridge.emitReady(ctx);
-		supervisorChannel.start();
+		// Intercom channel can wait a tick; slash/tool registration already ready.
+		supervisorStartupTimer = setTimeout(() => {
+			supervisorStartupTimer = undefined;
+			if (state.lastUiContext === ctx) supervisorChannel.start();
+		}, 0);
+		supervisorStartupTimer.unref?.();
 	});
 
 	pi.on("session_shutdown", () => {
+		const shutdownContext = state.lastUiContext;
+		clearDeferredSessionStart();
 		stopResultWatcher();
 		state.currentSessionId = null;
+		state.lastUiContext = null;
 		state.parentSessionFile = null;
 		completionNotifier.dispose();
 		delete process.env[SUBAGENT_PARENT_SESSION_ENV];
@@ -606,8 +623,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 			delete globalStore[runtimeCleanupStoreKey];
 		}
 		try {
-			if (state.lastUiContext?.hasUI) {
-				state.lastUiContext.ui.setWidget(WIDGET_KEY, undefined);
+			if (shutdownContext?.hasUI) {
+				shutdownContext.ui.setWidget(WIDGET_KEY, undefined);
 			}
 		} catch (error) {
 			if (!isStaleExtensionContextError(error)) throw error;

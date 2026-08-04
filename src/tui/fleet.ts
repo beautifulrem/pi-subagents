@@ -9,7 +9,7 @@ import { readStatus } from "../shared/utils.ts";
 import { formatAsyncRunTranscript } from "../runs/background/fleet-view.ts";
 import { listAsyncRuns, type AsyncRunSummary } from "../runs/background/async-status.ts";
 import { contextModeBadge, contextModeLabel } from "../runs/shared/context-mode.ts";
-import { FLEET_STATUS_WIDGET_KEY } from "./fleet-status.ts";
+import { FLEET_STATUS_WIDGET_KEY, parseFleetMouseEvent, type FleetMouseEvent } from "./fleet-status.ts";
 import { readFleetTranscript, renderFleetTranscript, type FleetTranscript } from "./fleet-transcript.ts";
 
 const REFRESH_MS = 750;
@@ -18,7 +18,7 @@ const TRANSCRIPT_LINES = 200;
 
 type Theme = ExtensionContext["ui"]["theme"];
 type FleetTui = {
-	terminal?: { rows: number };
+	terminal?: { rows: number; columns?: number };
 	requestRender(): void;
 };
 type AsyncStep = AsyncRunSummary["steps"][number];
@@ -437,6 +437,10 @@ export class SubagentFleetComponent implements Component {
 	private bodyHeight = 8;
 	private expandedTools = false;
 	private transcriptCache: FleetTranscriptCache | undefined;
+	private rosterStart = 0;
+	private renderedWidth = 0;
+	private renderedLineCount = 0;
+	private renderedRosterWidth = 0;
 	private disposed = false;
 	private readonly timer: ReturnType<typeof setInterval>;
 	private readonly tui: FleetTui;
@@ -477,12 +481,20 @@ export class SubagentFleetComponent implements Component {
 		this.selectedKey = this.snapshot.items[this.selected]?.key;
 	}
 
-	private moveSelection(delta: number): void {
+	private selectIndex(index: number): void {
 		if (this.snapshot.items.length === 0) return;
-		this.selected = Math.max(0, Math.min(this.snapshot.items.length - 1, this.selected + delta));
+		const selected = Math.max(0, Math.min(this.snapshot.items.length - 1, index));
+		if (selected === this.selected) return;
+		this.selected = selected;
 		this.selectedKey = this.snapshot.items[this.selected]?.key;
+		this.detailScroll = 0;
 		this.detailAutoFollow = true;
+		this.transcriptCache = undefined;
 		this.tui.requestRender();
+	}
+
+	private moveSelection(delta: number): void {
+		this.selectIndex(this.selected + delta);
 	}
 
 	private scrollDetail(delta: number): void {
@@ -493,14 +505,19 @@ export class SubagentFleetComponent implements Component {
 	}
 
 	handleInput(data: string): void {
+		const mouse = parseFleetMouseEvent(data);
+		if (mouse) {
+			this.handleMouse(mouse);
+			return;
+		}
 		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "q")) {
 			this.done(undefined);
 			return;
 		}
 		if (matchesKey(data, Key.shift("k"))) return this.scrollDetail(-1);
 		if (matchesKey(data, Key.shift("j"))) return this.scrollDetail(1);
-		if (matchesKey(data, "up") || matchesKey(data, "k")) return this.moveSelection(-1);
-		if (matchesKey(data, "down") || matchesKey(data, "j")) return this.moveSelection(1);
+		if (matchesKey(data, "up") || matchesKey(data, "left") || matchesKey(data, "k")) return this.moveSelection(-1);
+		if (matchesKey(data, "down") || matchesKey(data, "right") || matchesKey(data, "j")) return this.moveSelection(1);
 		if (matchesKey(data, "home")) return this.moveSelection(-this.snapshot.items.length);
 		if (matchesKey(data, "end")) return this.moveSelection(this.snapshot.items.length);
 		if (matchesKey(data, "pageUp")) return this.scrollDetail(-this.detailViewportHeight);
@@ -518,9 +535,31 @@ export class SubagentFleetComponent implements Component {
 		}
 	}
 
+	private rosterKeyAtMouse(mouse: FleetMouseEvent): string | undefined {
+		const rows = this.tui.terminal?.rows;
+		const columns = this.tui.terminal?.columns;
+		if (!rows || !columns || !this.renderedLineCount || !this.renderedWidth) return undefined;
+		const top = Math.floor((rows - this.renderedLineCount) / 2) + 1;
+		const left = Math.floor((columns - this.renderedWidth) / 2) + 1;
+		const relativeRow = mouse.row - top;
+		const relativeColumn = mouse.column - left;
+		if (relativeRow < 3 || relativeRow >= 3 + this.bodyHeight) return undefined;
+		if (relativeColumn < 1 || relativeColumn > this.renderedRosterWidth) return undefined;
+		return this.snapshot.items[this.rosterStart + relativeRow - 3]?.key;
+	}
+
+	private handleMouse(mouse: FleetMouseEvent): void {
+		if (mouse.button !== "left") return;
+		const key = this.rosterKeyAtMouse(mouse);
+		if (mouse.action !== "press" || !key) return;
+		const index = this.snapshot.items.findIndex((item) => item.key === key);
+		if (index >= 0) this.selectIndex(index);
+	}
+
 	private rosterLines(width: number): string[] {
 		if (this.snapshot.items.length === 0) return [this.theme.fg("dim", "No tracked children")];
 		const start = Math.max(0, Math.min(this.selected - this.bodyHeight + 1, Math.max(0, this.snapshot.items.length - this.bodyHeight)));
+		this.rosterStart = start;
 		return this.snapshot.items.slice(start, start + this.bodyHeight).map((item, offset) => {
 			const index = start + offset;
 			const marker = index === this.selected ? this.theme.fg("accent", "›") : " ";
@@ -592,7 +631,12 @@ export class SubagentFleetComponent implements Component {
 	}
 
 	render(width: number): string[] {
-		if (width < 36) return [truncateToWidth("Subagent fleet needs at least 36 columns. Esc closes.", width)];
+		if (width < 36) {
+			this.renderedWidth = 0;
+			this.renderedLineCount = 0;
+			this.renderedRosterWidth = 0;
+			return [truncateToWidth("Subagent fleet needs at least 36 columns. Esc closes.", width)];
+		}
 		const innerWidth = width - 2;
 		const rows = this.tui.terminal?.rows ?? 32;
 		this.bodyHeight = Math.max(2, Math.min(30, Math.floor(rows * 0.85) - 6));
@@ -629,9 +673,12 @@ export class SubagentFleetComponent implements Component {
 		}
 		lines.push(this.theme.fg("border", `├${"─".repeat(rosterWidth)}┴${"─".repeat(detailWidth)}┤`));
 		const position = this.snapshot.items.length ? `${this.selected + 1}/${this.snapshot.items.length}` : "0/0";
-		const footer = ` ↑↓/jk agent · ⇧k/⇧j scroll · PgUp/PgDn page · x/Ctrl+O tools · r refresh · Esc close · ${position}`;
+		const footer = ` click roster or ↑↓/←→/jk switch · ⇧k/⇧j scroll · PgUp/PgDn page · x/Ctrl+O tools · r refresh · Esc close · ${position}`;
 		lines.push(this.theme.fg("border", "│") + fit(this.theme.fg("dim", footer), innerWidth) + this.theme.fg("border", "│"));
 		lines.push(this.theme.fg("border", `╰${"─".repeat(innerWidth)}╯`));
+		this.renderedWidth = width;
+		this.renderedLineCount = lines.length;
+		this.renderedRosterWidth = rosterWidth;
 		return lines.map((line) => truncateToWidth(line, width));
 	}
 

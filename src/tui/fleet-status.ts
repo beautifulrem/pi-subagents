@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { isKeyRelease, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AsyncJobStep, SubagentState } from "../shared/types.ts";
 
 export const FLEET_STATUS_WIDGET_KEY = "subagent-fleet-status";
@@ -9,12 +9,34 @@ const REFRESH_MS = 500;
 
 type Theme = ExtensionContext["ui"]["theme"];
 type FleetStatusTui = {
+	terminal?: { rows?: number };
 	requestRender(): void;
 };
+export type FleetMouseEvent = {
+	action: "press" | "drag" | "release";
+	button: "left" | "other";
+	column: number;
+	row: number;
+};
+
+/** Parse SGR mouse input used by Pi/fixed-editor mouse reporting. */
+export function parseFleetMouseEvent(data: string): FleetMouseEvent | undefined {
+	const match = /\u001b\[<(\d+);(\d+);(\d+)([Mm])/.exec(data);
+	if (!match) return undefined;
+	const code = Number(match[1]);
+	const baseButton = code & ~(4 | 8 | 16 | 32);
+	return {
+		button: baseButton === 0 ? "left" : "other",
+		action: match[4] === "m" ? "release" : (code & 32) !== 0 ? "drag" : "press",
+		column: Number(match[2]),
+		row: Number(match[3]),
+	};
+}
 type FleetStatusEntry = {
 	key: string;
 	agent: string;
 	description?: string;
+	state: string;
 	startedAt: number;
 	tokens: number;
 };
@@ -57,6 +79,7 @@ export function collectFleetStatusEntries(state: SubagentState): FleetStatusEntr
 					key: `foreground-active:${control.runId}:${child.index}`,
 					agent: child.agent,
 					description: child.description,
+					state: "running",
 					startedAt: child.startedAt,
 					tokens: child.tokens ?? 0,
 				});
@@ -67,6 +90,7 @@ export function collectFleetStatusEntries(state: SubagentState): FleetStatusEntr
 			key: `foreground-active:${control.runId}:${control.currentIndex ?? 0}`,
 			agent: control.currentAgent ?? control.mode,
 			description: control.description,
+			state: "running",
 			startedAt: control.startedAt,
 			tokens: control.tokens ?? 0,
 		});
@@ -87,6 +111,7 @@ export function collectFleetStatusEntries(state: SubagentState): FleetStatusEntr
 				key: `async:${job.asyncId}`,
 				agent: job.mode ?? "subagent",
 				description: job.description,
+				state: job.status,
 				startedAt,
 				tokens: job.totalTokens?.total ?? 0,
 			});
@@ -100,6 +125,7 @@ export function collectFleetStatusEntries(state: SubagentState): FleetStatusEntr
 				key: `async:${job.asyncId}:${index}`,
 				agent: step.label ? `${step.label} (${step.agent})` : step.agent,
 				description: job.description,
+				state: step.status,
 				startedAt: step.startedAt ?? startedAt,
 				tokens: step.tokens?.total ?? (steps.length === 1 ? job.totalTokens?.total ?? 0 : 0),
 			});
@@ -115,11 +141,13 @@ export class SubagentFleetStatus {
 	private inputUnsubscribe: (() => void) | undefined;
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private widgetRegistered = false;
-	private active = false;
-	private selectedKey = "main";
 	private inspectorOpen = false;
 	private lastRenderKey = "";
 	private entries: FleetStatusEntry[] = [];
+	private clickableRows = new Map<number, string>();
+	private renderedLineCount = 0;
+	private renderedWidth = 0;
+	private screenRows = 0;
 	private readonly state: SubagentState;
 	private readonly openInspector: (itemKey: string) => Promise<void> | void;
 	private readonly refreshMs: number;
@@ -157,17 +185,18 @@ export class SubagentFleetStatus {
 		this.clearUiRegistration();
 		this.ctx = undefined;
 		this.entries = [];
-		this.active = false;
-		this.selectedKey = "main";
 		this.inspectorOpen = false;
 		this.lastRenderKey = "";
+		this.clickableRows.clear();
+		this.renderedLineCount = 0;
+		this.renderedWidth = 0;
+		this.screenRows = 0;
 	}
 
 	refresh(): void {
 		const ctx = this.ctx;
 		if (!ctx?.hasUI) return;
 		this.entries = collectFleetStatusEntries(this.state);
-		this.clampSelection();
 		if (this.inspectorOpen || this.state.fleetInspectorOpen) {
 			this.lastRenderKey = "";
 			if (this.widgetRegistered) {
@@ -178,8 +207,6 @@ export class SubagentFleetStatus {
 			return;
 		}
 		if (this.entries.length === 0) {
-			this.active = false;
-			this.selectedKey = "main";
 			this.lastRenderKey = "";
 			if (this.widgetRegistered) {
 				ctx.ui.setWidget(FLEET_STATUS_WIDGET_KEY, undefined);
@@ -215,129 +242,78 @@ export class SubagentFleetStatus {
 	}
 
 	handleKey(data: string): { consume?: boolean; data?: string } | undefined {
-		const ctx = this.ctx;
-		if (!ctx?.hasUI || this.entries.length === 0 || isKeyRelease(data)) return undefined;
-		if (this.inspectorOpen) return undefined;
-		if (!this.editorHasFocus()) {
-			if (this.active) this.deactivate();
-			return undefined;
-		}
-
-		if (!this.active) {
-			const activates = matchesKey(data, "down") || matchesKey(data, "left");
-			if (!activates || ctx.ui.getEditorText() !== "") return undefined;
-			this.active = true;
-			this.selectedKey = "main";
-			this.refresh();
-			return { consume: true };
-		}
-
-		const roster = this.rosterKeys();
-		const selectedIndex = Math.max(0, roster.indexOf(this.selectedKey));
-		if (matchesKey(data, "down")) {
-			this.selectedKey = roster[Math.min(roster.length - 1, selectedIndex + 1)] ?? "main";
-			this.refresh();
-			return { consume: true };
-		}
-		if (matchesKey(data, "up")) {
-			if (selectedIndex === 0) {
-				this.deactivate();
-				return { consume: true };
-			}
-			this.selectedKey = roster[selectedIndex - 1] ?? "main";
-			this.refresh();
-			return { consume: true };
-		}
-		if (matchesKey(data, "escape")) {
-			this.deactivate();
-			return { consume: true };
-		}
-		if (matchesKey(data, Key.enter)) {
-			if (this.selectedKey === "main") {
-				this.deactivate();
-				return { consume: true };
-			}
-			this.inspectorOpen = true;
-			this.refresh();
-			const selectedKey = this.selectedKey;
-			void Promise.resolve()
-				.then(() => this.openInspector(selectedKey))
-				.catch((error) => ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"))
-				.finally(() => {
-					this.inspectorOpen = false;
-					this.refresh();
-				});
-			return { consume: true };
-		}
-
-		this.deactivate();
-		return undefined;
+		if (!this.ctx?.hasUI || this.entries.length === 0 || this.inspectorOpen || isKeyRelease(data)) return undefined;
+		const mouse = parseFleetMouseEvent(data);
+		return mouse ? this.handleMouse(mouse) : undefined;
 	}
 
 	render(width: number, theme: Theme): string[] {
 		if (this.entries.length === 0) return [];
-		const roster = this.rosterKeys();
-		const selectedIndex = Math.max(0, roster.indexOf(this.selectedKey));
-		const hint = this.active
-			? "↑↓ select · enter inspect · esc back"
-			: "esc to interrupt · ← for agents · ↓ to manage";
-		const lines = [truncateToWidth(`  ${theme.fg("dim", hint)}`, width), ""];
-		lines.push(truncateToWidth(`  ${this.bullet(0, selectedIndex, theme)} main`, width));
-
+		const lines = [truncateToWidth(`  ${theme.fg("dim", "Subagents · click a row to inspect · Ctrl+Alt+F opens fleet")}`, width), ""];
+		const rowKeys: Array<string | undefined> = [undefined, undefined];
 		const visibleCount = Math.min(this.maxAgentRows, this.entries.length);
-		const selectedAgentIndex = Math.max(0, selectedIndex - 1);
-		const start = selectedAgentIndex < visibleCount ? 0 : selectedAgentIndex - visibleCount + 1;
-		const hiddenBelow = this.entries.length - (start + visibleCount);
-		if (start > 0) lines.push(rightAlign("", theme.fg("dim", `↑ ${start} more`), width));
-		for (let index = start; index < start + visibleCount; index++) {
-			lines.push(this.renderEntry(index + 1, selectedIndex, this.entries[index]!, width, theme));
+		for (let index = 0; index < visibleCount; index++) {
+			lines.push(this.renderEntry(this.entries[index]!, width, theme));
+			rowKeys.push(this.entries[index]!.key);
 		}
-		if (hiddenBelow > 0) lines.push(rightAlign("", theme.fg("dim", `↓ ${hiddenBelow} more`), width));
+		const hiddenBelow = this.entries.length - visibleCount;
+		if (hiddenBelow > 0) {
+			lines.push(rightAlign("", theme.fg("dim", `↓ ${hiddenBelow} more`), width));
+			rowKeys.push(undefined);
+		}
+		// Visible-width space survives fixed-editor's trailing-empty trim and creates one gap.
+		lines.push(" ");
+		rowKeys.push(undefined);
+		this.clickableRows.clear();
+		rowKeys.forEach((key, row) => { if (key) this.clickableRows.set(row, key); });
+		this.renderedLineCount = lines.length;
+		this.renderedWidth = width;
+		const rows = this.tui?.terminal?.rows;
+		if (typeof rows === "number" && Number.isFinite(rows)) this.screenRows = rows;
 		return lines;
 	}
 
-	private renderEntry(rosterIndex: number, selectedIndex: number, entry: FleetStatusEntry, width: number, theme: Theme): string {
+	private renderEntry(entry: FleetStatusEntry, width: number, theme: Theme): string {
 		const description = entry.description?.replace(/\s+/g, " ").trim();
-		const left = `  ${this.bullet(rosterIndex, selectedIndex, theme)} ${theme.fg("muted", entry.agent)}${description ? `  ${description}` : ""}`;
+		const glyph = entry.state === "running" ? theme.fg("accent", "●") : theme.fg("muted", "◦");
+		const left = `  ${glyph} ${theme.fg("muted", entry.agent)}${description ? `  ${description}` : ""}`;
 		const elapsed = Date.now() - entry.startedAt;
 		const right = theme.fg("dim", `${formatFleetElapsed(elapsed)} · ${formatFleetTokens(entry.tokens)}`);
 		return rightAlign(left, right, width);
 	}
 
-	private bullet(rosterIndex: number, selectedIndex: number, theme: Theme): string {
-		return rosterIndex === selectedIndex ? theme.fg("accent", "⏺") : theme.fg("dim", "◯");
-	}
-
-	private rosterKeys(): string[] {
-		return ["main", ...this.entries.map((entry) => entry.key)];
-	}
-
-	private clampSelection(): void {
-		if (!this.rosterKeys().includes(this.selectedKey)) this.selectedKey = "main";
-	}
-
-	private deactivate(): void {
-		this.active = false;
-		this.selectedKey = "main";
+	private openItem(itemKey: string): void {
+		const ctx = this.ctx;
+		if (!ctx?.hasUI) return;
+		this.inspectorOpen = true;
 		this.refresh();
+		void Promise.resolve()
+			.then(() => this.openInspector(itemKey))
+			.catch((error) => ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"))
+			.finally(() => {
+				this.inspectorOpen = false;
+				this.refresh();
+			});
 	}
 
-	private editorHasFocus(): boolean {
-		// pi-tui exposes focus mutation but no focus getter; fail closed if this compatibility seam disappears.
-		const focused = (this.tui as unknown as { focusedComponent?: unknown } | undefined)?.focusedComponent;
-		return focused instanceof Editor;
+	private handleMouse(mouse: FleetMouseEvent): { consume?: boolean } | undefined {
+		if (mouse.button !== "left" || mouse.action !== "press" || mouse.column < 1 || mouse.column > this.renderedWidth) return undefined;
+		const widgetStartRow = this.screenRows - this.renderedLineCount; // one footer row below
+		const key = this.clickableRows.get(mouse.row - widgetStartRow);
+		if (!key) return undefined;
+		this.openItem(key);
+		return { consume: true };
 	}
 
 	private getRenderKey(): string {
 		const now = Date.now();
 		return JSON.stringify({
-			active: this.active,
-			selected: this.selectedKey,
 			inspectorOpen: this.inspectorOpen,
 			entries: this.entries.map((entry) => [
 				entry.key,
 				entry.agent,
 				entry.description,
+				entry.state,
 				Math.round((now - entry.startedAt) / 1000),
 				entry.tokens,
 			]),

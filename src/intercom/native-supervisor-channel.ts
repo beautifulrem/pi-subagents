@@ -22,6 +22,8 @@ export const NATIVE_SUPERVISOR_TOOL_NAME = "subagent_supervisor";
 const MAX_MESSAGE_BYTES = 64 * 1024;
 const DEFAULT_ASK_TIMEOUT_MS = 10 * 60 * 1000;
 const CHANNEL_POLL_MS = Math.min(POLL_INTERVAL_MS, 500);
+const IDLE_CHANNEL_POLL_MS = 2_000;
+const MAX_SEEN_FILES_BEFORE_PRUNE = 256;
 const STALE_EMPTY_CHANNEL_AGE_MS = 60 * 1000;
 const STALE_EMPTY_CHANNEL_CLEANUP_INTERVAL_MS = 60 * 1000;
 
@@ -718,7 +720,8 @@ function buildParentIntercomTool(pending: Map<string, PendingSupervisorRequest>,
 export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentState): { start: () => void; dispose: () => void; pending: Map<string, PendingSupervisorRequest> } {
 	const pending = new Map<string, PendingSupervisorRequest>();
 	const seenFiles = new Set<string>();
-	let poller: ReturnType<typeof setInterval> | undefined;
+	let poller: ReturnType<typeof setTimeout> | undefined;
+	let disposed = true;
 	let lastStaleCleanupAt = 0;
 
 	const registerParentTools = (): void => {
@@ -735,6 +738,12 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 		} catch {
 			// Supervisor delivery must not fail because best-effort temp cleanup failed.
 		}
+	};
+
+	const hasActiveWork = (): boolean => {
+		if (pending.size > 0 || state.subagentInProgress || state.foregroundControls.size > 0) return true;
+		if (state.foregroundRuns && [...state.foregroundRuns.values()].some((run) => run.children.some((child) => child.status === "running" || child.status === "detached"))) return true;
+		return state.asyncJobs ? [...state.asyncJobs.values()].some((job) => !["complete", "completed", "failed", "paused", "stopped"].includes(job.status)) : false;
 	};
 
 	const poll = (): void => {
@@ -783,18 +792,35 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 				});
 			}
 		}
+		if (seenFiles.size > MAX_SEEN_FILES_BEFORE_PRUNE) {
+			for (const file of seenFiles) {
+				if (!fs.existsSync(file)) seenFiles.delete(file);
+			}
+		}
+	};
+
+	const schedulePoll = (): void => {
+		if (disposed) return;
+		if (poller) clearTimeout(poller);
+		poller = setTimeout(() => {
+			poller = undefined;
+			poll();
+			schedulePoll();
+		}, hasActiveWork() ? CHANNEL_POLL_MS : IDLE_CHANNEL_POLL_MS);
+		poller.unref?.();
 	};
 
 	return {
 		start: () => {
-			if (poller) return;
+			if (!disposed) return;
+			disposed = false;
 			registerParentTools();
 			poll();
-			poller = setInterval(poll, CHANNEL_POLL_MS);
-			poller.unref?.();
+			schedulePoll();
 		},
 		dispose: () => {
-			if (poller) clearInterval(poller);
+			disposed = true;
+			if (poller) clearTimeout(poller);
 			poller = undefined;
 			pending.clear();
 			seenFiles.clear();

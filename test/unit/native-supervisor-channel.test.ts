@@ -113,6 +113,29 @@ afterEach(() => {
 });
 
 describe("native supervisor channel", () => {
+	it("backs idle polling off to two seconds", () => {
+		const realSetTimeout = globalThis.setTimeout;
+		const realClearTimeout = globalThis.clearTimeout;
+		const delays: number[] = [];
+		globalThis.setTimeout = ((_handler: () => void, delay?: number) => {
+			delays.push(Number(delay));
+			return { unref() {} };
+		}) as never;
+		globalThis.clearTimeout = (() => undefined) as never;
+		try {
+			const sessionId = `session-${randomUUID()}`;
+			const ctx = { sessionManager: { getSessionId: () => sessionId } };
+			const pi = { getAllTools: () => [], registerTool() {}, sendMessage() {} };
+			const channel = createNativeSupervisorChannel(pi as never, makeState(sessionId, ctx));
+			channel.start();
+			channel.dispose();
+			assert.deepEqual(delays, [2000]);
+		} finally {
+			globalThis.setTimeout = realSetTimeout;
+			globalThis.clearTimeout = realClearTimeout;
+		}
+	});
+
 	it("delivers requests only to the exact current session id and wakes the parent", () => {
 		const currentSessionId = `session-${randomUUID()}`;
 		const otherSessionId = `session-${randomUUID()}`;

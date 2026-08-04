@@ -43,6 +43,41 @@ describe("subagent extension child mode", () => {
 		execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], { cwd: projectRoot, env: parentToolEnv(), stdio: "pipe" });
 	});
 
+	it("renders control notices with the standard output card shell", () => {
+		const script = String.raw`
+			import registerSubagentExtension from "./index.ts";
+			const renderers = new Map();
+			const events = { on() { return () => {}; }, emit() {} };
+			const fakePi = new Proxy({
+				events,
+				registerTool() {}, registerCommand() {}, registerShortcut() {},
+				registerMessageRenderer(type, renderer) { renderers.set(type, renderer); },
+				sendMessage() {}, getSessionName() { return undefined; },
+			}, { get(target, prop) { return prop in target ? target[prop] : () => undefined; } });
+			registerSubagentExtension(fakePi);
+			const renderer = renderers.get("subagent_control_notice");
+			if (!renderer) throw new Error("control notice renderer not registered");
+			const backgrounds = [];
+			const component = renderer({
+				content: "Subagent needs attention: reviewer\\nRun: run-1",
+				details: {
+					event: { type: "needs_attention", to: "needs_attention", ts: 1, runId: "run-1", agent: "reviewer", message: "idle" },
+					noticeText: "Subagent needs attention: reviewer\\nRun: run-1",
+				},
+			}, { expanded: false, outputPad: 1 }, {
+				fg(_name, text) { return text; },
+				bg(name, text) { backgrounds.push(name); return text; },
+				bold(text) { return text; },
+			});
+			const text = component.render(80).join("\\n");
+			if ((text.match(/Subagent needs attention: reviewer/g) ?? []).length !== 1) throw new Error("duplicated title: " + text);
+			if (/[╭╰│]/.test(text)) throw new Error("non-standard hand-drawn frame: " + text);
+			if (!backgrounds.includes("toolErrorBg")) throw new Error("missing alert output background: " + backgrounds.join(","));
+		`;
+
+		execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], { cwd: projectRoot, env: parentToolEnv(), stdio: "pipe" });
+	});
+
 	it("collapses tool detail before direct subagent tool execution", () => {
 		const script = String.raw`
 			import registerSubagentExtension from "./index.ts";

@@ -501,7 +501,7 @@ describe("native subagent fleet", () => {
 		assert.equal(state.fleetInspectorOpen, false);
 	});
 
-	it("opens the inspector with the FleetView-selected child focused", () => {
+	it("opens focused and switches agents by roster click or adjacent keys", () => {
 		const state = stateForTest();
 		state.foregroundControls.set("run-worker", {
 			runId: "run-worker",
@@ -527,8 +527,18 @@ describe("native subagent fleet", () => {
 			{ initialKey: "foreground-active:run-worker:0", refreshMs: 60_000 },
 		);
 		try {
-			const selectedLine = component.render(90).find((line) => line.includes("›"));
+			let selectedLine = component.render(90).find((line) => line.includes("›"));
 			assert.ok(selectedLine?.includes("run-work"), `unexpected selected row: ${selectedLine}`);
+			component.handleInput("\x1b[<2;5;6M");
+			component.handleInput("\x1b[<0;60;6M");
+			selectedLine = component.render(90).find((line) => line.includes("›"));
+			assert.ok(selectedLine?.includes("run-work"), `invalid click changed selection: ${selectedLine}`);
+			component.handleInput("\x1b[<0;5;6M");
+			selectedLine = component.render(90).find((line) => line.includes("›"));
+			assert.ok(selectedLine?.includes("run-revi"), `roster click did not switch: ${selectedLine}`);
+			component.handleInput("\x1b[C");
+			selectedLine = component.render(90).find((line) => line.includes("›"));
+			assert.ok(selectedLine?.includes("run-work"), `Right did not switch: ${selectedLine}`);
 		} finally {
 			component.dispose();
 		}

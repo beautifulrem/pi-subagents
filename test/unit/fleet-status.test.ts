@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { Editor, visibleWidth } from "@earendil-works/pi-tui";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SubagentState } from "../../src/shared/types.ts";
 import { collectFleetSnapshot } from "../../src/tui/fleet.ts";
@@ -10,6 +10,7 @@ import {
 	collectFleetStatusEntries,
 	formatFleetElapsed,
 	formatFleetTokens,
+	parseFleetMouseEvent,
 } from "../../src/tui/fleet-status.ts";
 
 function stateForTest(): SubagentState {
@@ -45,7 +46,7 @@ describe("below-editor subagent FleetView", () => {
 		assert.equal(formatFleetTokens(1_250_000), "↓ 1.3M tokens");
 	});
 
-	it("renders main plus active children below the editor and bounds every line", () => {
+	it("renders active children as a status overview and bounds every line", () => {
 		const state = stateForTest();
 		const now = Date.now();
 		for (let index = 0; index < 7; index++) {
@@ -84,10 +85,12 @@ describe("below-editor subagent FleetView", () => {
 			assert.ok(widgetFactory);
 			const component = widgetFactory!({ requestRender() {} }, theme);
 			const lines = component.render(80);
-			assert.ok(lines.some((line) => line.includes("⏺ main")));
-			assert.ok(lines.some((line) => line.includes("worker-0") && line.includes("Inspect module 0")));
+			assert.ok(lines.some((line) => line.includes("click a row to inspect")));
+			assert.ok(!lines.some((line) => line.includes(" main")), "status overview should not pretend main is an inspectable child");
+			assert.ok(lines.some((line) => line.includes("● worker-0") && line.includes("Inspect module 0")));
 			assert.ok(lines.some((line) => line.includes("11s · ↓ 13.1k tokens")));
 			assert.ok(lines.some((line) => line.includes("↓ 2 more")));
+			assert.equal(lines.at(-1), " ", "widget keeps one visual blank before footer");
 			for (const line of lines) assert.ok(visibleWidth(line) <= 80, `line exceeded width: ${line}`);
 		} finally {
 			fleet.dispose();
@@ -296,7 +299,7 @@ describe("below-editor subagent FleetView", () => {
 		}
 	});
 
-	it("only captures navigation at an empty editor and opens the selected child", async () => {
+	it("leaves editor keyboard navigation untouched", () => {
 		const state = stateForTest();
 		state.foregroundControls.set("run-worker", {
 			runId: "run-worker",
@@ -306,7 +309,39 @@ describe("below-editor subagent FleetView", () => {
 			currentAgent: "worker",
 			description: "Implement FleetView",
 		});
-		let editorText = "draft";
+		let inputHandler: ((data: string) => { consume?: boolean } | undefined) | undefined;
+		const ctx = {
+			hasUI: true,
+			ui: {
+				setWidget() {},
+				onTerminalInput(handler: typeof inputHandler) { inputHandler = handler; return () => { inputHandler = undefined; }; },
+				requestRender() {},
+				notify() {},
+				theme,
+			},
+		} as unknown as ExtensionContext;
+		const fleet = new SubagentFleetStatus(state, () => {}, { refreshMs: 60_000 });
+		try {
+			fleet.setContext(ctx);
+			assert.equal(inputHandler!("\x1b[B"), undefined);
+			assert.equal(inputHandler!("\x1b[D"), undefined);
+			assert.equal(inputHandler!("\r"), undefined);
+			assert.equal(inputHandler!("\x1b"), undefined);
+		} finally {
+			fleet.dispose();
+		}
+	});
+
+	it("opens a clicked child row using fixed-editor screen coordinates", async () => {
+		assert.deepEqual(parseFleetMouseEvent("\x1b[<0;5;18M"), { button: "left", action: "press", column: 5, row: 18 });
+		const state = stateForTest();
+		state.foregroundControls.set("run-reviewer", {
+			runId: "run-reviewer",
+			mode: "single",
+			startedAt: Date.now() - 1_000,
+			updatedAt: Date.now(),
+			currentAgent: "reviewer",
+		});
 		let inputHandler: ((data: string) => { consume?: boolean } | undefined) | undefined;
 		let widgetFactory: ((tui: unknown, theme: typeof theme) => { render(width: number): string[] }) | undefined;
 		const opened: string[] = [];
@@ -314,8 +349,8 @@ describe("below-editor subagent FleetView", () => {
 			hasUI: true,
 			ui: {
 				setWidget(_key: string, content: typeof widgetFactory | undefined) { if (content) widgetFactory = content; },
-				onTerminalInput(handler: typeof inputHandler) { inputHandler = handler; return () => { inputHandler = undefined; }; },
-				getEditorText() { return editorText; },
+				onTerminalInput(handler: typeof inputHandler) { inputHandler = handler; return () => {}; },
+				getEditorText() { return ""; },
 				requestRender() {},
 				notify() {},
 				theme,
@@ -324,26 +359,17 @@ describe("below-editor subagent FleetView", () => {
 		const fleet = new SubagentFleetStatus(state, async (key) => { opened.push(key); }, { refreshMs: 60_000 });
 		try {
 			fleet.setContext(ctx);
-			assert.ok(inputHandler);
-			assert.ok(widgetFactory);
-			const tui = { requestRender() {}, focusedComponent: Object.create(Editor.prototype) as Editor };
-			const component = widgetFactory!(tui, theme);
-
-			assert.equal(inputHandler!("\x1b[B"), undefined, "non-empty editor should retain Down");
-			editorText = "";
-			tui.focusedComponent = {} as Editor;
-			assert.equal(inputHandler!("\x1b[B"), undefined, "non-editor focus should retain Down");
-			tui.focusedComponent = Object.create(Editor.prototype) as Editor;
-			assert.deepEqual(inputHandler!("\x1b[B"), { consume: true });
-			assert.deepEqual(inputHandler!("\x1b[B"), { consume: true });
-			assert.ok(component.render(100).some((line) => line.includes("⏺ worker")));
-			assert.deepEqual(inputHandler!("\r"), { consume: true });
-			await Promise.resolve();
-			assert.deepEqual(opened, ["foreground-active:run-worker:0"]);
+			const component = widgetFactory!({
+				terminal: { rows: 20 },
+				requestRender() {},
+				focusedComponent: { focused: true, handleInput() {}, getText() { return ""; }, setText() {} },
+			}, theme);
+			component.render(100); // rows 17..20; child is row 18
+			assert.equal(inputHandler!("\x1b[<2;5;18M"), undefined, "non-left click should be ignored");
+			assert.equal(inputHandler!("\x1b[<0;101;18M"), undefined, "click beyond widget should be ignored");
+			assert.deepEqual(inputHandler!("\x1b[<0;5;18M\x1b[<0;5;18m"), { consume: true });
 			await new Promise<void>((resolve) => setImmediate(resolve));
-			widgetFactory!(tui, theme);
-			assert.deepEqual(inputHandler!("\x1b"), { consume: true });
-			assert.ok(component.render(100).some((line) => line.includes("⏺ main")));
+			assert.deepEqual(opened, ["foreground-active:run-reviewer:0"]);
 		} finally {
 			fleet.dispose();
 		}
