@@ -1,14 +1,60 @@
-# pi-subagents
+# pi-subagents (remi)
 
-`pi-subagents` lets Pi delegate work to focused child agents. Use it for code review, scouting, implementation, parallel audits, saved workflows, background jobs, and anything else that benefits from a second or third set of model eyes.
+Optimized implementation of [pi-subagents](https://github.com/nicobailon/pi-subagents) — the Pi extension that lets Pi delegate work to focused child agents (scout, researcher, planner, worker, reviewer, oracle, …) with chains, parallel fan-out, background runs, worktree isolation, and a live fleet inspector.
 
-## Local installation
+This is a personal optimization fork. The `remi` branch tracks upstream through the **0.40.0** release and layers local hardening on top: private-by-default artifacts, async control-record authentication, durable process-terminal proofs, cumulative budget semantics, and runtime-session capability ceilings. Upstream `main` (which contains the post-0.40.0 `workflowScript` refactor) is intentionally **not** merged yet — see [Syncing with upstream](#syncing-with-upstream).
 
-This checkout is a private, local-only Pi harness. Pi loads it through the
-`local-packages/pi-subagents` entry in `~/.pi/agent/settings.json`.
+## What makes this fork different
 
-It is not configured for npm publication or an upstream pull-request/issue
-workflow. Keep changes and commits in this local Git checkout.
+Everything upstream 0.38–0.40.0 ships is here (chain approval checkpoints, usage-budget gating, Fleet inspector steer/stop controls, agent aliases, session-scoped `allowedAgents`, watchdog scope monitoring, `/subagents-detach`, runtime filesystem caching, launch-contract digests). On top of that, the `remi` line adds:
+
+| Optimization | What it does |
+|---|---|
+| **Durable process-terminal proof v3** | Detached async runners record exact `close` observations per writer process. `process-terminal.json` is `observed` only after the live parent sees the exact runner close, every recorded child writer has a close record, and any tracked canonical-session lease is free; otherwise it stays conservatively `unknown`. Per-step projections include the runner instance, map writers by stable `stepIndex`, and cover zero-item dynamic placeholders. |
+| **Private-by-default artifacts** | All subagent artifacts (status, results, metadata, runner logs, chain handoffs, process-terminal candidates) are written with private modes (`0o600`) via atomic temp+rename. Nested artifact symlinks are rejected and chain artifacts are scoped to their originating run. |
+| **Async control-record authentication** | Each async runner is minted a base64url capability token at spawn. The runner strips it from the environment before launching Pi children (no leakage to grandchildren), and control events signed with the wrong or child-originated token are rejected. Runs without a declared capability keep upstream pass-through behavior. |
+| **Result claim leases** | Result-file claims are leased while live, released when settled, and recovered after a crash, so a stale observer cannot overwrite a fresher terminal result. |
+| **Cumulative budgets across fallback attempts** | Turn and tool budgets count usage from earlier model attempts (`turnBudgetOffset` / `toolBudgetOffset`), and `usageIncomplete` is marked when an attempt reports no usage payload instead of pretending it is exact zero. |
+| **Runtime-session capability ceilings** | Ceiling lookup prefers the runtime session id (`parentSessionId ?? currentSessionId`) over the session-file identity, so out-of-band `registerSubagentCapabilityCeiling` registrations apply to top-level async single/parallel/chain launches in every mode. |
+| **Stable status fields** | `stepIndex`, `runnableAt`, `queueDurationMs`, and `usageIncomplete` are persisted in async status/results/events/metadata for exact result-to-step mapping and scheduler observability. |
+| **Dynamic fanout hardening** | Item keys are escaped for host-generated text (`formatDynamicItemKey`) in workflow labels and downstream headers; abort guards prevent queued children from creating structured-output artifacts after the parent aborts. |
+| **Workflow-graph terminal state** | `currentNodeId` is cleared on every refresh unless the run is queued/running/paused, so completed runs never report a stale current node. |
+| **Node 26 test harness** | Tests run under `node --experimental-strip-types` with temp isolation (`test/support/isolate-temp.mjs`), and the doctor release gate validates the packed file list against the installed npm's `pack --json` shape (array or object). |
+| **Doctor attestation** | `computePackageSourceSnapshot` hashes the npm source surface (now including `LICENSE`) with a deterministic SHA-256 manifest, bounded file/entry/byte limits, and symlink refusal. |
+
+**Verification status (this branch):**
+
+- Unit: **1569 passed**, 1 skipped (baseline hermitic suite)
+- Integration: **734/734 passed**
+- E2E: **3/3 passed**
+
+## Installation
+
+This checkout is a private, local-only Pi harness. Pi loads it through the `local-packages/pi-subagents` entry in `~/.pi/agent/settings.json`.
+
+```bash
+git clone https://github.com/beautifulrem/pi-subagents.git
+cd pi-subagents
+git checkout remi
+npm install   # dev deps for the test suite
+```
+
+Then point `~/.pi/agent/settings.json` at the checkout (see the `local-packages` entry) and restart Pi. The fork is not published to npm, so `pi install npm:pi-subagents` installs the upstream package instead.
+
+## Syncing with upstream
+
+```bash
+git remote add upstream https://github.com/nicobailon/pi-subagents.git   # once
+git fetch upstream
+git checkout remi
+git merge -X theirs upstream/main    # or a release tag such as upstream/main@<release>
+npm run test:all
+```
+
+Two cautions:
+
+- Upstream `main` after 0.40.0 replaces the chain/parallel API surface with `workflowScript` (breaking: `/chain`, `/parallel`, and `/run-chain` are removed). Evaluate that refactor on a scratch branch first — it touches exactly the surfaces this fork hardens.
+- The `-X theirs` strategy keeps non-conflicting local hardening while taking upstream on overlap. After any merge, run the full suite and re-check the local-only symbols (process-terminal proofs, control-capability token, budget offsets) — a merge can silently drop a declaration.
 
 ## Try this first
 
