@@ -2,14 +2,14 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { formatDuration, formatModelAttemptUsage, formatModelThinking, formatTokens, shortenPath } from "../../shared/formatters.ts";
 import { formatActivityLabel, formatParallelOutcome } from "../../shared/status-format.ts";
-import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type CostSummary, type NestedRunSummary, type SteeringStatus, type SubagentRunMode, type TokenUsage, type TurnBudgetState } from "../../shared/types.ts";
+import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type CostSummary, type LaunchResolvedChildExtensionsV1, type RuntimeAcknowledgedChildExtensionsV1, type NestedRunSummary, type SteeringStatus, type SubagentRunMode, type TokenUsage, type TurnBudgetState, type UsageBudgetState, type ChainCheckpointState } from "../../shared/types.ts";
+import type { ResolvedSubagentCapabilityCeiling, SubagentCapabilityAudit } from "../shared/capability-ceiling.ts";
 import { readStatus } from "../../shared/utils.ts";
 import { attachRootChildrenToSteps, buildNestedRouteIndex, type NestedRoute, projectNestedEvents } from "../shared/nested-events.ts";
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
 import { flatToLogicalStepIndex, normalizeParallelGroups } from "./parallel-groups.ts";
 import { contextModeLabel, summarizeContextModes, type ContextMode, type ContextSummary } from "../shared/context-mode.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
-import type { ResolvedSubagentCapabilityCeiling, SubagentCapabilityAudit } from "../shared/capability-ceiling.ts";
 import { readProcessTerminal, sanitizeProcessTerminal } from "./process-terminal.ts";
 
 interface AsyncRunStepSummary {
@@ -17,9 +17,11 @@ interface AsyncRunStepSummary {
 	agent: string;
 	context?: ContextMode;
 	label?: string;
+	description?: string;
 	phase?: string;
 	outputName?: string;
 	structured?: boolean;
+	checkpoint?: ChainCheckpointState;
 	status: AsyncJobStep["status"];
 	activityState?: ActivityState;
 	lastActivityAt?: number;
@@ -56,9 +58,11 @@ interface AsyncRunStepSummary {
 	execution?: AsyncJobStep["execution"];
 	review?: AsyncJobStep["review"];
 	effects?: AsyncJobStep["effects"];
+	processTerminal?: AsyncJobStep["processTerminal"];
+	launchResolvedExtensions?: LaunchResolvedChildExtensionsV1;
+	runtimeAcknowledgedExtensions?: RuntimeAcknowledgedChildExtensionsV1;
 	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
 	capabilityAudit?: SubagentCapabilityAudit;
-	processTerminal?: AsyncJobStep["processTerminal"];
 	children?: NestedRunSummary[];
 }
 
@@ -66,7 +70,7 @@ export interface AsyncRunSummary {
 	id: string;
 	asyncDir: string;
 	sessionId?: string;
-	state: "queued" | "running" | "complete" | "failed" | "paused" | "stopped";
+	state: "queued" | "running" | "complete" | "failed" | "paused" | "stopped" | "rejected";
 	error?: string;
 	activityState?: ActivityState;
 	lastActivityAt?: number;
@@ -94,16 +98,20 @@ export interface AsyncRunSummary {
 	pendingAppends?: number;
 	parallelGroups?: AsyncParallelGroupStatus[];
 	steps: AsyncRunStepSummary[];
+	checkpoint?: ChainCheckpointState;
 	sessionDir?: string;
 	outputFile?: string;
 	totalTokens?: TokenUsage;
 	totalCost?: CostSummary;
+	usageBudget?: UsageBudgetState;
 	sessionFile?: string;
 	nestedChildren?: NestedRunSummary[];
 	nestedWarnings?: string[];
+	processTerminal?: AsyncStatus["processTerminal"];
+	launchResolvedExtensions?: LaunchResolvedChildExtensionsV1;
+	runtimeAcknowledgedExtensions?: RuntimeAcknowledgedChildExtensionsV1;
 	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
 	capabilityAudit?: SubagentCapabilityAudit;
-	processTerminal?: AsyncStatus["processTerminal"];
 }
 
 interface AsyncRunListOptions {
@@ -237,9 +245,11 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			agent: step.agent,
 			...(step.context ? { context: step.context } : {}),
 			...(step.label ? { label: step.label } : {}),
+			...(step.description ? { description: step.description } : {}),
 			...(step.phase ? { phase: step.phase } : {}),
 			...(step.outputName ? { outputName: step.outputName } : {}),
 			...(step.structured ? { structured: step.structured } : {}),
+			...(step.checkpoint ? { checkpoint: step.checkpoint } : {}),
 			status: step.status,
 			...(stepActivityState ? { activityState: stepActivityState } : {}),
 			...(stepLastActivityAt ? { lastActivityAt: stepLastActivityAt } : {}),
@@ -273,12 +283,15 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.wrapUpRequested !== undefined ? { wrapUpRequested: step.wrapUpRequested } : {}),
 			...(step.acceptance ? { acceptance: step.acceptance } : {}),
 			...(step.agentContract ? { agentContract: step.agentContract } : {}),
+			...(step.launchContractDigest ? { launchContractDigest: step.launchContractDigest } : {}),
+			...(step.launchResolvedExtensions ? { launchResolvedExtensions: step.launchResolvedExtensions } : {}),
+			...(step.runtimeAcknowledgedExtensions ? { runtimeAcknowledgedExtensions: step.runtimeAcknowledgedExtensions } : {}),
 			...(step.execution ? { execution: step.execution } : {}),
 			...(step.review ? { review: step.review } : {}),
 			...(step.effects ? { effects: step.effects } : {}),
+			...(step.processTerminal ? { processTerminal: sanitizeProcessTerminal(step.processTerminal, { runId: status.runId, runnerProcessInstanceId: step.processTerminal.runnerProcessInstanceId }, `${path.join(asyncDir, "status.json")} step ${index}`) } : {}),
 			...(step.capabilityCeiling ? { capabilityCeiling: step.capabilityCeiling } : {}),
 			...(step.capabilityAudit ? { capabilityAudit: step.capabilityAudit } : {}),
-			...(step.processTerminal ? { processTerminal: sanitizeProcessTerminal(step.processTerminal, { runId: status.runId, runnerProcessInstanceId: step.processTerminal.runnerProcessInstanceId }, `${path.join(asyncDir, "status.json")} step ${index}`) } : {}),
 			...(step.children?.length ? { children: step.children } : {}),
 		};
 	});
@@ -315,15 +328,20 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 		...(status.pendingAppends !== undefined ? { pendingAppends: status.pendingAppends } : {}),
 		...(parallelGroups.length ? { parallelGroups } : {}),
 		steps: summarizedSteps,
+		...(status.checkpoint ? { checkpoint: status.checkpoint } : {}),
 		...(nestedChildren.length ? { nestedChildren } : {}),
 		...(nestedWarnings.length ? { nestedWarnings } : {}),
+		...(processTerminal ? { processTerminal } : {}),
+		...(status.launchContractDigest ? { launchContractDigest: status.launchContractDigest } : {}),
+		...(status.launchResolvedExtensions ? { launchResolvedExtensions: status.launchResolvedExtensions } : {}),
+		...(status.runtimeAcknowledgedExtensions ? { runtimeAcknowledgedExtensions: status.runtimeAcknowledgedExtensions } : {}),
 		...(status.capabilityCeiling ? { capabilityCeiling: status.capabilityCeiling } : {}),
 		...(status.capabilityAudit ? { capabilityAudit: status.capabilityAudit } : {}),
-		...(processTerminal ? { processTerminal } : {}),
 		...(status.sessionDir ? { sessionDir: status.sessionDir } : {}),
 		...(status.outputFile ? { outputFile: status.outputFile } : {}),
 		...(status.totalTokens ? { totalTokens: status.totalTokens } : {}),
 		...(status.totalCost ? { totalCost: status.totalCost } : {}),
+		...(status.usageBudget ? { usageBudget: status.usageBudget } : {}),
 		...(status.sessionFile ? { sessionFile: status.sessionFile } : {}),
 	};
 }

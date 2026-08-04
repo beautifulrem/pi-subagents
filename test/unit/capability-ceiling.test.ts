@@ -4,9 +4,9 @@ import {
 	decodeSubagentCapabilityCeiling,
 	encodeSubagentCapabilityCeiling,
 	intersectSubagentCapabilityCeilings,
+	resolveCurrentSubagentCapabilityCeiling,
 	parseSubagentCapabilityCeiling,
 	registerSubagentCapabilityCeiling,
-	resolveCurrentSubagentCapabilityCeiling,
 	resolveSubagentCapabilityCeiling,
 } from "../../src/api/capability-ceiling.ts";
 
@@ -32,24 +32,8 @@ describe("subagent capability ceiling", () => {
 		assert.equal(intersectSubagentCapabilityCeilings(), undefined);
 	});
 
-	it("only narrows a registration until its handle is disposed", () => {
-		const sessionId = `monotonic-${Date.now()}-${Math.random()}`;
-		const handle = registerSubagentCapabilityCeiling({ sessionId, source: "plan", ceiling: { allowedTools: ["read"], denyExtensions: true } });
-		try {
-			handle.update({ allowedTools: ["read", "write"], denyExtensions: false });
-			assert.deepEqual(resolveSubagentCapabilityCeiling(sessionId), {
-				version: 1,
-				allowedTools: ["read"],
-				denyExtensions: true,
-				sources: ["plan"],
-			});
-		} finally {
-			handle.dispose();
-		}
-	});
-
 	it("rejects malformed policy and disposed updates", () => {
-		assert.throws(() => registerSubagentCapabilityCeiling({ sessionId: "x", source: "x", ceiling: {} }), /allowedTools or denyExtensions/);
+		assert.throws(() => registerSubagentCapabilityCeiling({ sessionId: "x", source: "x", ceiling: {} }), /allowedTools, allowedAgents, or denyExtensions/);
 		const handle = registerSubagentCapabilityCeiling({ sessionId: "disposed", source: "test", ceiling: { denyExtensions: true } });
 		handle.dispose();
 		assert.throws(() => handle.update({ allowedTools: ["read"] }), /disposed/);

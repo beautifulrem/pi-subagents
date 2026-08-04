@@ -3,7 +3,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { formatParallelHandoffReference, writeParallelHandoffGroup } from "../../src/runs/shared/parallel-handoff.ts";
+import {
+	formatParallelHandoffReference,
+	writeParallelHandoffGroup,
+} from "../../src/runs/shared/parallel-handoff.ts";
 import type { ParallelHandoffManifest } from "../../src/shared/types.ts";
 import type { WorktreeCleanupReport, WorktreeDiff, WorktreeSetup } from "../../src/runs/shared/worktree.ts";
 
@@ -15,14 +18,30 @@ function diff(dir: string, index: number, agent: string, changed: boolean): Work
 	const patchPath = path.join(dir, `task-${index}-${agent}.patch`);
 	fs.mkdirSync(path.dirname(patchPath), { recursive: true });
 	fs.writeFileSync(patchPath, changed ? "diff --git a/a b/a\n" : "", "utf-8");
-	return { index, agent, branch: `branch-${index}`, diffStat: changed ? " a | 1 +" : "", filesChanged: changed ? 1 : 0, insertions: changed ? 1 : 0, deletions: 0, patchPath };
+	return {
+		index,
+		agent,
+		branch: `branch-${index}`,
+		diffStat: changed ? " a | 1 +" : "",
+		filesChanged: changed ? 1 : 0,
+		insertions: changed ? 1 : 0,
+		deletions: 0,
+		patchPath,
+	};
 }
 
 function cleanup(state: "complete" | "partial" = "complete"): WorktreeCleanupReport {
 	return {
 		state,
 		pruned: state === "complete",
-		tasks: [{ index: 0, path: "/tmp/worktree-0", branch: "branch-0", worktreeRemoved: true, branchRemoved: state === "complete", ...(state === "partial" ? { errors: ["branch removal failed"] } : {}) }],
+		tasks: [{
+			index: 0,
+			path: "/tmp/worktree-0",
+			branch: "branch-0",
+			worktreeRemoved: true,
+			branchRemoved: state === "complete",
+			...(state === "partial" ? { errors: ["branch removal failed"] } : {}),
+		}],
 	};
 }
 
@@ -42,10 +61,25 @@ describe("parallel handoff", () => {
 				setup: setup("/repo", "base-1"),
 				diffs: [diff(dir, 0, "worker", true)],
 				cleanup: cleanup(),
-				results: [{ agent: "worker", status: "completed", summary: "implemented", outputPath: "/artifacts/output.md", structuredOutput: { ok: true }, structuredOutputPath: "/artifacts/structured.json", sessionPath: "/sessions/worker.jsonl" }],
+				results: [{
+					agent: "worker",
+					status: "completed",
+					summary: "implemented",
+					outputPath: "/artifacts/output.md",
+					structuredOutput: { ok: true },
+					structuredOutputPath: "/artifacts/structured.json",
+					sessionPath: "/sessions/worker.jsonl",
+				}],
 				now: 100,
 			});
-			assert.deepEqual(first, { version: 1, path: manifestPath, groupCount: 1, childCount: 1, changedPatches: 1, cleanupState: "complete" });
+			assert.deepEqual(first, {
+				version: 1,
+				path: manifestPath,
+				groupCount: 1,
+				childCount: 1,
+				changedPatches: 1,
+				cleanupState: "complete",
+			});
 
 			const second = writeParallelHandoffGroup({
 				manifestPath,
@@ -62,6 +96,7 @@ describe("parallel handoff", () => {
 				now: 200,
 			});
 			assert.equal(second.groupCount, 2);
+			assert.equal(second.childCount, 2);
 			assert.equal(second.changedPatches, 1);
 			assert.equal(second.cleanupState, "partial");
 			assert.match(formatParallelHandoffReference(second), /2 children, 1 changed patches, cleanup partial/);
@@ -91,7 +126,10 @@ describe("parallel handoff", () => {
 				cwd: "/repo",
 				stepIndex: 0,
 				flatStartIndex: 0,
-				setup: { ...setup("/repo", "base-1"), worktrees: [{ path: "/tmp/worktree-0", agentCwd: "/tmp/worktree-0", branch: "branch-0", index: 0, nodeModulesLinked: false, syntheticPaths: [] }] },
+				setup: {
+					...setup("/repo", "base-1"),
+					worktrees: [{ path: "/tmp/worktree-0", agentCwd: "/tmp/worktree-0", branch: "branch-0", index: 0, nodeModulesLinked: false, syntheticPaths: [] }],
+				},
 				diffs: [],
 				cleanup: cleanup(),
 				results: [{ agent: "bad/name agent", status: "completed", summary: "done" }],
@@ -100,6 +138,7 @@ describe("parallel handoff", () => {
 			assert.equal(reference.changedPatches, 0);
 			const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8")) as ParallelHandoffManifest;
 			const patch = manifest.groups[0]!.children[0]!.patch;
+			assert.equal(patch.changed, false);
 			assert.match(patch.error ?? "", /diff artifact unavailable/);
 			assert.equal(path.basename(patch.path), "missing-diff-step-0-task-0-bad_name_agent.patch");
 			assert.equal(fs.existsSync(patch.path), true);
@@ -112,9 +151,23 @@ describe("parallel handoff", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-parallel-handoff-owner-"));
 		try {
 			const manifestPath = path.join(dir, "handoff.json");
-			const common = { manifestPath, mode: "parallel" as const, source: "foreground" as const, cwd: "/repo", stepIndex: 0, flatStartIndex: 0, setup: setup("/repo", "base-1"), diffs: [diff(dir, 0, "worker", false)], cleanup: cleanup(), results: [{ agent: "worker", status: "completed" as const, summary: "done" }] };
+			const common = {
+				manifestPath,
+				mode: "parallel" as const,
+				source: "foreground" as const,
+				cwd: "/repo",
+				stepIndex: 0,
+				flatStartIndex: 0,
+				setup: setup("/repo", "base-1"),
+				diffs: [diff(dir, 0, "worker", false)],
+				cleanup: cleanup(),
+				results: [{ agent: "worker", status: "completed" as const, summary: "done" }],
+			};
 			writeParallelHandoffGroup({ ...common, runId: "run-1" });
-			assert.throws(() => writeParallelHandoffGroup({ ...common, runId: "run-2" }), /belongs to a different run/);
+			assert.throws(
+				() => writeParallelHandoffGroup({ ...common, runId: "run-2" }),
+				/belongs to a different run/,
+			);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

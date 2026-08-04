@@ -38,7 +38,7 @@ export interface SubagentDelegationExecutionResult {
 }
 
 export interface SubagentDelegationReviewResult {
-	status: "not-requested" | "no-blockers" | "blockers" | "needs-parent-decision";
+	status: "not-requested" | "review-required" | "reviewed" | "blockers";
 	findings?: Array<{ severity: "blocker" | "non-blocking"; file?: string; issue: string; rationale: string }>;
 }
 
@@ -131,6 +131,7 @@ export interface SubagentDelegationStarted {
 }
 
 export interface SubagentDelegationUpdate extends SubagentDelegationStarted {
+	runId?: string;
 	currentTool?: string;
 	currentToolArgs?: string;
 	recentOutput?: string;
@@ -150,6 +151,7 @@ export type SubagentDelegationStatus =
 	| "interrupted"
 	| "turn_budget_exhausted"
 	| "tool_budget_exhausted"
+	| "structured_output_failed"
 	| "acceptance_failed"
 	| "invalid_request"
 	| "unavailable_context";
@@ -161,12 +163,14 @@ export type SubagentDelegationAcceptanceStatus =
 	| "attested"
 	| "checked"
 	| "verified"
+	| "review-required"
 	| "reviewed"
 	| "accepted"
 	| "rejected";
 
 export interface SubagentDelegationAcceptanceResult {
 	status: SubagentDelegationAcceptanceStatus;
+	evidenceStatus: Exclude<SubagentDelegationAcceptanceStatus, "review-required" | "reviewed" | "accepted">;
 	explicit: boolean;
 }
 
@@ -227,6 +231,7 @@ export interface SubagentDelegationV2Started {
 }
 
 export interface SubagentDelegationV2Update extends SubagentDelegationV2Started {
+	runId?: string;
 	currentTool?: string;
 	currentToolArgs?: string;
 	recentOutput?: string;
@@ -263,6 +268,7 @@ export interface SubagentDelegationV2TerminalResponse extends SubagentDelegation
 	model?: string;
 	thinking?: string;
 	exitCode?: number;
+	launchContractDigest?: string;
 	result?: SubagentDelegationV2Value;
 	usage?: SubagentDelegationV2Usage;
 }

@@ -4,16 +4,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { registerSubagentCapabilityCeiling, resolveSubagentCapabilityCeiling } from "../../src/api/capability-ceiling.ts";
-import { resolveSubagentLaunchContract, SUBAGENT_LAUNCH_CONTRACT_VERSION, type SubagentLaunchContractInput } from "../../src/api/preflight.ts";
+import { resolveSubagentLaunchContract, SUBAGENT_LAUNCH_CONTRACT_VERSION } from "../../src/api/preflight.ts";
 import { clearSkillCache } from "../../src/agents/skills.ts";
-import { EXTRA_AGENT_DIRS_ENV } from "../../src/agents/agents.ts";
 import { computeMcpServerHash } from "../../src/runs/shared/mcp-direct-tool-allowlist.ts";
 
 let tempDir = "";
+let previousHome: string | undefined;
+let previousUserProfile: string | undefined;
 let previousAgentDir: string | undefined;
-let previousExtraAgentDirs: string | undefined;
-let userAgentsDir = "";
-let userSkillsDir = "";
 
 function writeAgent(filePath: string, body: string): void {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -49,56 +47,31 @@ function writeMcpFixture(): void {
 	});
 }
 
-function resolveHermeticPreflight(input: SubagentLaunchContractInput) {
-	return resolveSubagentLaunchContract(input, {
-		discovery: { userAgentsDir, userSkillsDir },
-	});
-}
-
 describe("public launch contract preflight", () => {
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-preflight-"));
+		previousHome = process.env.HOME;
+		previousUserProfile = process.env.USERPROFILE;
 		previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-		previousExtraAgentDirs = process.env[EXTRA_AGENT_DIRS_ENV];
-		process.env.PI_CODING_AGENT_DIR = path.join(tempDir, "agent-dir");
-		delete process.env[EXTRA_AGENT_DIRS_ENV];
-		userAgentsDir = path.join(tempDir, "isolated-user-agents");
-		userSkillsDir = path.join(tempDir, "isolated-user-skills");
+		const home = path.join(tempDir, "home");
+		process.env.HOME = home;
+		process.env.USERPROFILE = home;
+		process.env.PI_CODING_AGENT_DIR = path.join(home, ".pi", "agent");
 		clearSkillCache();
 	});
 
 	afterEach(() => {
 		clearSkillCache();
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+		if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+		else process.env.USERPROFILE = previousUserProfile;
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		if (previousExtraAgentDirs === undefined) delete process.env[EXTRA_AGENT_DIRS_ENV];
-		else process.env[EXTRA_AGENT_DIRS_ENV] = previousExtraAgentDirs;
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("uses one injected discovery boundary for selected agents, shadow candidates, and skills", async () => {
-		const cwd = path.join(tempDir, "repo");
-		const suffix = path.basename(tempDir).replace(/[^A-Za-z0-9_-]/g, "-");
-		const agentName = `hermetic-agent-${suffix}`;
-		const skillName = `hermetic-skill-${suffix}`;
-		const projectAgentPath = path.join(cwd, ".pi", "agents", `${agentName}.md`);
-		const userAgentPath = path.join(userAgentsDir, `${agentName}.md`);
-		const userSkillPath = path.join(userSkillsDir, `${skillName}.md`);
-
-		fs.mkdirSync(cwd, { recursive: true });
-		writeAgent(userAgentPath, `---\nname: ${agentName}\ndescription: Isolated user candidate\n---\nUser candidate.\n`);
-		writeAgent(userSkillPath, `---\ndescription: Isolated user skill\n---\nUse the isolated skill.\n`);
-		writeAgent(projectAgentPath, `---\nname: ${agentName}\ndescription: Selected project candidate\nskills:\n  - ${skillName}\n---\nProject candidate.\n`);
-
-		const result = await resolveHermeticPreflight({ agent: agentName, cwd });
-
-		assert.equal(result.ok, true);
-		assert.equal(result.contract.agent.filePath, projectAgentPath);
-		assert.deepEqual(result.contract.skills.resolved.map((skill) => skill.path), [userSkillPath]);
-		assert.ok(result.contract.agent.shadowedCandidates.some((candidate) => candidate.filePath === userAgentPath && candidate.selected === false));
-	});
-
-	it("resolves a deterministic contract without creating launch directories", async () => {
+	it("resolves an ordinary single-agent contract without creating launch directories", async () => {
 		const cwd = path.join(tempDir, "repo");
 		fs.mkdirSync(cwd, { recursive: true });
 		writeSkill(cwd, "project-skill");
@@ -123,7 +96,7 @@ Project prompt.
 		const handle = registerSubagentCapabilityCeiling({ sessionId: "preflight-session", ceiling: { allowedTools: ["read"], denyExtensions: true }, source: "test" });
 		try {
 			const ceiling = resolveSubagentCapabilityCeiling("preflight-session");
-			const input = {
+			const result = await resolveSubagentLaunchContract({
 				agent: "worker",
 				cwd,
 				task: "Inspect the repo",
@@ -134,22 +107,43 @@ Project prompt.
 					{ provider: "test", id: "fallback", fullId: "test/fallback" },
 				],
 				capabilityCeiling: ceiling,
-			};
-			const result = await resolveHermeticPreflight(input);
+			});
 
 			assert.equal(result.ok, true);
 			assert.equal(result.contract.version, SUBAGENT_LAUNCH_CONTRACT_VERSION);
 			assert.equal(result.contract.agent.source, "project");
+			assert.equal(result.contract.agent.definitionProjectionVersion, 1);
+			assert.match(result.contract.agent.definitionDigest, /^[a-f0-9]{64}$/);
+			assert.match(result.contract.launchContractDigest, /^[a-f0-9]{64}$/);
+			assert.ok(result.contract.agent.shadowedCandidates.some((candidate) => candidate.name === "worker" && candidate.source === "builtin"));
 			assert.equal(result.contract.model, "test/primary:high");
 			assert.deepEqual(result.contract.modelCandidates, ["test/primary:high", "test/fallback:high"]);
+			assert.equal(result.contract.thinking, "high");
 			assert.deepEqual(result.contract.skills.requested, ["project-skill"]);
+			assert.equal(result.contract.skills.resolved[0]?.name, "project-skill");
 			assert.deepEqual(result.contract.tools.effectiveAllowlist, ["read"]);
 			assert.deepEqual(result.contract.tools.capabilityAudit?.removedTools, ["write"]);
 			assert.equal(result.contract.tools.capabilityAudit?.removedExtensionCount, 1);
+			assert.equal(result.contract.tools.disableAmbientExtensions, true);
 			assert.equal(result.contract.roots.sessionFile, path.join(sessionRoot, "run-123", "run-0", "session.jsonl"));
 			assert.equal(result.contract.roots.outputPath, path.join(cwd, ".pi-subagents", "artifacts", "outputs", "run-123", "report.md"));
+			assert.equal(result.contract.roots.lifecycle?.statusPath.endsWith(path.join("run-123", "status.json")), true);
+			assert.equal(result.contract.roots.lifecycle?.eventsPath.endsWith(path.join("run-123", "events.jsonl")), true);
+			assert.equal(result.contract.roots.lifecycle?.processTerminalPath.endsWith(path.join("run-123", "process-terminal.json")), true);
+			assert.notEqual(result.contract.roots.lifecycle?.asyncDir, result.contract.roots.artifactsDir);
 			assert.match(result.contract.digest, /^[a-f0-9]{64}$/);
-			const repeated = await resolveHermeticPreflight(input);
+			const repeated = await resolveSubagentLaunchContract({
+				agent: "worker",
+				cwd,
+				task: "Inspect the repo",
+				runId: "run-123",
+				sessionRoot,
+				availableModels: [
+					{ provider: "test", id: "primary", fullId: "test/primary" },
+					{ provider: "test", id: "fallback", fullId: "test/fallback" },
+				],
+				capabilityCeiling: ceiling,
+			});
 			assert.equal(repeated.ok, true);
 			assert.equal(repeated.contract.digest, result.contract.digest);
 			assert.equal(fs.existsSync(sessionRoot), false);
@@ -159,18 +153,149 @@ Project prompt.
 		}
 	});
 
-	it("returns closed failures for missing agents, skills, and invalid inputs", async () => {
+	it("resolves agent aliases to the canonical launch contract agent", async () => {
+		const cwd = path.join(tempDir, "repo-alias");
+		fs.mkdirSync(cwd, { recursive: true });
+		writeAgent(path.join(cwd, ".pi", "agents", "worker.md"), `---
+name: worker
+description: Project worker
+aliases: developer, coder
+---
+Project prompt.
+`);
+
+		const result = await resolveSubagentLaunchContract({
+			agent: "developer",
+			cwd,
+			task: "Implement the change",
+		});
+
+		assert.equal(result.ok, true);
+		assert.equal(result.contract.agent.name, "worker");
+	});
+
+	it("reports alias collisions as ambiguous agents", async () => {
+		const cwd = path.join(tempDir, "repo-alias-collision");
+		fs.mkdirSync(cwd, { recursive: true });
+		writeAgent(path.join(cwd, ".pi", "agents", "worker.md"), `---
+name: worker
+description: Project worker
+aliases: coder
+---
+Project prompt.
+`);
+		writeAgent(path.join(cwd, ".pi", "agents", "reviewer.md"), `---
+name: reviewer
+description: Project reviewer
+aliases: coder
+---
+Review prompt.
+`);
+
+		const result = await resolveSubagentLaunchContract({ agent: "coder", cwd });
+
+		assert.equal(result.ok, false);
+		assert.equal(result.code, "ambiguous_agent");
+		assert.match(result.message, /Ambiguous agent alias 'coder': reviewer, worker|Ambiguous agent alias 'coder': worker, reviewer/);
+	});
+
+	it("changes definition and launch digests when selected agent content changes", async () => {
 		const cwd = path.join(tempDir, "repo");
 		fs.mkdirSync(cwd, { recursive: true });
-		writeAgent(path.join(cwd, ".pi", "agents", "worker.md"), `---\nname: worker\ndescription: Project worker\nskills:\n  - missing-skill\n---\nProject prompt.\n`);
+		const agentPath = path.join(cwd, ".pi", "agents", "worker.md");
+		writeAgent(agentPath, `---
+name: digest-worker
+description: Digest worker
+tools:
+  - read
+---
+First prompt.
+`);
+		const before = await resolveSubagentLaunchContract({ agent: "digest-worker", cwd, runId: "digest-test" });
+		assert.equal(before.ok, true);
+		writeAgent(agentPath, `---
+name: digest-worker
+description: Digest worker
+tools:
+  - read
+---
+Changed prompt.
+`);
+		const after = await resolveSubagentLaunchContract({ agent: "digest-worker", cwd, runId: "digest-test" });
+		assert.equal(after.ok, true);
+		assert.notEqual(after.contract.agent.definitionDigest, before.contract.agent.definitionDigest);
+		assert.notEqual(after.contract.launchContractDigest, before.contract.launchContractDigest);
+		assert.notEqual(after.contract.digest, before.contract.digest);
+	});
 
-		assert.deepEqual(await resolveHermeticPreflight({ agent: "missing", cwd }), { ok: false, code: "missing_agent", message: "Unknown agent: missing", diagnostics: [] });
-		const missingSkill = await resolveHermeticPreflight({ agent: "worker", cwd });
+	it("binds resolved skill content into the launch digest", async () => {
+		const cwd = path.join(tempDir, "repo");
+		fs.mkdirSync(cwd, { recursive: true });
+		writeSkill(cwd, "digest-skill");
+		writeAgent(path.join(cwd, ".pi", "agents", "worker.md"), `---
+name: worker
+description: Project worker
+tools:
+  - read
+skills:
+  - digest-skill
+---
+Project prompt.
+`);
+		const before = await resolveSubagentLaunchContract({ agent: "worker", cwd, runId: "skill-digest-test" });
+		assert.equal(before.ok, true);
+		fs.writeFileSync(path.join(cwd, ".pi", "skills", "digest-skill", "SKILL.md"), "---\ndescription: updated digest-skill\n---\n\nUse digest-skill.\n", "utf-8");
+		clearSkillCache();
+
+		const after = await resolveSubagentLaunchContract({ agent: "worker", cwd, runId: "skill-digest-test" });
+		assert.equal(after.ok, true);
+		assert.equal(after.contract.agent.definitionDigest, before.contract.agent.definitionDigest);
+		assert.notEqual(after.contract.launchContractDigest, before.contract.launchContractDigest);
+		assert.notEqual(after.contract.digest, before.contract.digest);
+	});
+
+	it("returns closed failures for missing agents and missing skills", async () => {
+		const cwd = path.join(tempDir, "repo");
+		fs.mkdirSync(cwd, { recursive: true });
+		writeAgent(path.join(cwd, ".pi", "agents", "worker.md"), `---
+name: worker
+description: Project worker
+skills:
+  - missing-skill
+---
+Project prompt.
+`);
+
+		const missingAgent = await resolveSubagentLaunchContract({ agent: "missing", cwd });
+		assert.deepEqual(missingAgent, { ok: false, code: "missing_agent", message: "Unknown agent: missing", diagnostics: [] });
+
+		const missingSkill = await resolveSubagentLaunchContract({ agent: "worker", cwd });
 		assert.equal(missingSkill.ok, false);
 		assert.equal(missingSkill.code, "missing_skill");
-		assert.equal((await resolveHermeticPreflight({ agent: "worker", cwd: path.join(tempDir, "missing") })).code, "invalid_cwd");
-		assert.equal((await resolveHermeticPreflight({ agent: "worker", cwd, context: "bogus" as never })).code, "unsupported_mode");
-		assert.equal((await resolveHermeticPreflight({ agent: "worker", cwd, artifactDir: "bogus" as never })).code, "invalid_artifact_dir");
+		assert.match(missingSkill.message, /missing-skill/);
+	});
+
+	it("fails closed for invalid runtime inputs", async () => {
+		const cwd = path.join(tempDir, "repo");
+		fs.mkdirSync(cwd, { recursive: true });
+		writeAgent(path.join(cwd, ".pi", "agents", "worker.md"), `---
+name: worker
+description: Project worker
+---
+Project prompt.
+`);
+
+		const invalidCwd = await resolveSubagentLaunchContract({ agent: "worker", cwd: path.join(tempDir, "missing") });
+		assert.equal(invalidCwd.ok, false);
+		assert.equal(invalidCwd.code, "invalid_cwd");
+
+		const unsupportedMode = await resolveSubagentLaunchContract({ agent: "worker", cwd, context: "bogus" as never });
+		assert.equal(unsupportedMode.ok, false);
+		assert.equal(unsupportedMode.code, "unsupported_mode");
+
+		const invalidArtifactDir = await resolveSubagentLaunchContract({ agent: "worker", cwd, artifactDir: "bogus" as never });
+		assert.equal(invalidArtifactDir.ok, false);
+		assert.equal(invalidArtifactDir.code, "invalid_artifact_dir");
 	});
 
 	it("projects MCP, extension, fanout, structured-output, and fork diagnostics", async () => {
@@ -194,15 +319,24 @@ defaultContext: fork
 Project prompt.
 `);
 
-		const result = await resolveHermeticPreflight({ agent: "fanout", cwd, outputSchema: { type: "object", additionalProperties: false } });
+		const result = await resolveSubagentLaunchContract({
+			agent: "fanout",
+			cwd,
+			outputSchema: { type: "object", additionalProperties: false },
+		});
 		assert.equal(result.ok, true);
 		assert.equal(result.contract.context, "fork");
 		assert.ok(result.contract.diagnostics.some((diagnostic) => diagnostic.code === "host_required"));
 		assert.deepEqual(result.contract.tools.declaredBuiltin, ["read", "subagent"]);
+		assert.equal(result.contract.tools.explicitAllowlist, true);
 		assert.equal(result.contract.tools.fanoutAuthorized, true);
 		assert.deepEqual(result.contract.tools.internalTools, ["structured_output"]);
 		assert.deepEqual(result.contract.tools.effectiveMcpTools, ["github_search_repositories"]);
 		assert.deepEqual(result.contract.tools.requiredChildTools, ["read", "subagent", "github_search_repositories", "structured_output"]);
+		assert.deepEqual(result.contract.tools.toolExtensionPaths, ["/tmp/tool-ext.ts"]);
+		assert.equal(result.contract.tools.disableAmbientExtensions, true);
+		assert.ok(result.contract.tools.runtimeExtensions.some((extensionPath) => extensionPath.endsWith("subagent-prompt-runtime.ts")));
+		assert.ok(result.contract.tools.runtimeExtensions.some((extensionPath) => extensionPath.endsWith("fanout-child.ts")));
 		assert.ok(result.contract.tools.extensionArgs.includes("/tmp/config-ext.ts"));
 		assert.ok(result.contract.tools.extensionArgs.includes("/tmp/subagent-only.ts"));
 	});
@@ -211,8 +345,22 @@ Project prompt.
 		const cwd = path.join(tempDir, "repo");
 		fs.mkdirSync(cwd, { recursive: true });
 		writeSkill(cwd, "project-skill");
-		writeAgent(path.join(cwd, ".pi", "agents", "worker.md"), `---\nname: worker\ndescription: Project worker\ntools:\n  - read\nskills:\n  - project-skill\n---\nProject prompt.\n`);
-		const result = await resolveHermeticPreflight({ agent: "worker", cwd, capabilityCeiling: { version: 1, allowedTools: [], denyExtensions: false, sources: ["test"] } });
+		writeAgent(path.join(cwd, ".pi", "agents", "worker.md"), `---
+name: worker
+description: Project worker
+tools:
+  - read
+skills:
+  - project-skill
+---
+Project prompt.
+`);
+
+		const result = await resolveSubagentLaunchContract({
+			agent: "worker",
+			cwd,
+			capabilityCeiling: { version: 1, allowedTools: [], denyExtensions: false, sources: ["test"] },
+		});
 		assert.equal(result.ok, false);
 		assert.equal(result.code, "denied_required_tool");
 		assert.match(result.message, /excludes required tool 'read'/);

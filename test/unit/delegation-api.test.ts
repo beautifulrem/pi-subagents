@@ -213,7 +213,7 @@ describe("public subagent delegation contract", () => {
 			},
 			executeVersioned: async (_id, params, _signal, _ctx, onUpdate) => {
 				observedParams = params as unknown as Record<string, unknown>;
-				onUpdate({ details: { mode: "single", results: [{ agent: "reviewer", model: "openai/gpt-5", thinking: "high" }], progress: [{ currentTool: "read" }] } });
+				onUpdate({ details: { mode: "single", runId: "run-v2", results: [{ agent: "reviewer", model: "openai/gpt-5", thinking: "high" }], progress: [{ currentTool: "read" }] } });
 				return {
 					details: {
 						mode: "single",
@@ -223,6 +223,7 @@ describe("public subagent delegation contract", () => {
 							exitCode: 0,
 							model: "openai/gpt-5",
 							thinking: "high",
+							launchContractDigest: "launch-contract-digest",
 							finalOutput: '{"looks":"json"}',
 							usage: { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, cost: 0.01, turns: 2 },
 							progressSummary: { toolCount: 6, tokens: 5, durationMs: 7 },
@@ -237,7 +238,7 @@ describe("public subagent delegation contract", () => {
 		const responsePromise = once(events, SUBAGENT_DELEGATION_RESPONSE_EVENT);
 		events.emit(SUBAGENT_DELEGATION_REQUEST_EVENT, textRequest);
 		assert.deepEqual(await startedPromise, { version: 2, requestId: "attempt-1", ownerRunId: "owner-1", nodeId: "node-1" });
-		assert.deepEqual(await updatePromise, { version: 2, requestId: "attempt-1", ownerRunId: "owner-1", nodeId: "node-1", currentTool: "read", model: "openai/gpt-5" });
+		assert.deepEqual(await updatePromise, { version: 2, requestId: "attempt-1", ownerRunId: "owner-1", nodeId: "node-1", runId: "run-v2", currentTool: "read", model: "openai/gpt-5" });
 		assert.deepEqual(await responsePromise, {
 			version: 2,
 			requestId: "attempt-1",
@@ -249,6 +250,7 @@ describe("public subagent delegation contract", () => {
 			model: "openai/gpt-5",
 			thinking: "high",
 			exitCode: 0,
+			launchContractDigest: "launch-contract-digest",
 			result: { kind: "text", text: '{"looks":"json"}' },
 			usage: { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, cost: 0.01, turns: 2, toolCalls: 6, durationMs: 7 },
 		} satisfies SubagentDelegationV2Response);
@@ -261,6 +263,7 @@ describe("public subagent delegation contract", () => {
 			model: "openai/gpt-5",
 			timeoutMs: 1_000,
 			turnBudget: { maxTurns: 4, graceTurns: 1 },
+			enforceHardTurnLimit: true,
 			toolBudget: { soft: 3, hard: 5, block: "*" },
 			skill: ["review"],
 			output: false,
@@ -537,7 +540,7 @@ describe("public subagent delegation contract", () => {
 							progressSummary: { toolCount: 4, tokens: 5, durationMs: 6 },
 							agentContract: { version: 1 },
 							execution: { status: "completed", success: true, exitCode: 0 },
-							acceptance: { status: "checked", explicit: true },
+							acceptance: { status: "checked", evidenceStatus: "checked", explicit: true },
 							review: { status: "not-requested" },
 							effects: { fileMutation: { status: "missing", expected: true, attempted: false } },
 							skillsWarning: "Skills not found: review",
@@ -574,6 +577,7 @@ describe("public subagent delegation contract", () => {
 			model: "openai/gpt-5",
 			timeoutMs: 1_000,
 			turnBudget: { maxTurns: 4, graceTurns: 1 },
+			enforceHardTurnLimit: true,
 			toolBudget: { soft: 3, hard: 5, block: "*" },
 			skill: ["review"],
 			output: "result.md",
@@ -598,7 +602,7 @@ describe("public subagent delegation contract", () => {
 		assert.equal(response.turns, 2);
 		assert.equal(response.toolCount, 4);
 		assert.equal(response.tokens, 5);
-		assert.deepEqual(response.acceptance, { status: "checked", explicit: true });
+		assert.deepEqual(response.acceptance, { status: "checked", evidenceStatus: "checked", explicit: true });
 		assert.deepEqual(response.warnings, ["Skills not found: review"]);
 		bridge.dispose();
 	});
@@ -686,6 +690,7 @@ describe("public subagent delegation contract", () => {
 			[{ stopped: true }, "interrupted"],
 			[{ turnBudgetExceeded: true }, "turn_budget_exhausted"],
 			[{ toolBudgetBlocked: true }, "tool_budget_exhausted"],
+			[{ turnBudgetExceeded: true, structuredOutputFailed: true }, "structured_output_failed"],
 			[{ acceptance: { status: "rejected", explicit: true } }, "acceptance_failed"],
 			[{ agentContract: { version: 1 }, acceptance: { status: "rejected", explicit: true } }, "completed"],
 			[{ acceptance: { status: "rejected", explicit: false } }, "completed"],

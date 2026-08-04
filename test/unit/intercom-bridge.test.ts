@@ -44,11 +44,15 @@ describe("resolveIntercomBridgeMode", () => {
 
 describe("resolveIntercomSessionTarget", () => {
 	it("prefers an explicit session name", () => {
-		assert.equal(resolveIntercomSessionTarget("planner", "session-12345678"), "planner");
+		assert.equal(resolveIntercomSessionTarget("planner", "session-12345678", "session-stableabcdef"), "planner");
 	});
 
 	it("uses a runtime-only subagent chat alias when unnamed", () => {
-		assert.equal(resolveIntercomSessionTarget(undefined, "session-12345678"), "subagent-chat-12345678");
+		assert.equal(resolveIntercomSessionTarget(undefined, "session-12345678", ""), "subagent-chat-12345678");
+	});
+
+	it("uses the current pi-intercom runtime id for unnamed fallback when present", () => {
+		assert.equal(resolveIntercomSessionTarget(undefined, "session-12345678", "session-stableabcdef"), "subagent-chat-stableab");
 	});
 });
 
@@ -94,8 +98,19 @@ describe("resolveIntercomBridge", () => {
 		});
 
 		assert.equal(bridge.active, true);
+		assert.equal(bridge.resultDelivery, true);
 		assert.equal(bridge.orchestratorTarget, "main");
 		assert.equal(bridge.extensionDir, NATIVE_INTERCOM_EXTENSION_DIR);
+	});
+
+	it("can disable external grouped-result delivery without disabling supervisor coordination", () => {
+		const bridge = resolveIntercomBridge({
+			config: { mode: "always", resultDelivery: false },
+			context: "fresh",
+			orchestratorTarget: "main",
+		});
+		assert.equal(bridge.active, true);
+		assert.equal(bridge.resultDelivery, false);
 	});
 
 	it("stays inactive for fresh context when mode is fork-only", () => {
@@ -144,6 +159,7 @@ describe("applyIntercomBridgeToAgent", () => {
 	const activeBridge: IntercomBridgeState = {
 		active: true,
 		mode: "always",
+		resultDelivery: true,
 		orchestratorTarget: "main",
 		extensionDir: NATIVE_INTERCOM_EXTENSION_DIR,
 		instruction: "Intercom orchestration channel:\n- Need a decision or blocked: contact_supervisor({ reason: \"need_decision\", message: \"<question>\" })\n- Blocked/update: contact_supervisor({ reason: \"progress_update\", message: \"UPDATE: <summary>\" })",
@@ -169,5 +185,16 @@ describe("applyIntercomBridgeToAgent", () => {
 		const updated = applyIntercomBridgeToAgent(agent, activeBridge);
 		assert.deepEqual(updated.tools, ["read", "intercom", "contact_supervisor"]);
 		assert.match(updated.systemPrompt, /contact_supervisor/);
+	});
+
+	it("does not widen explicit empty or MCP-only builtin allowlists", () => {
+		const emptyTools = applyIntercomBridgeToAgent(makeAgent({ tools: [] }), activeBridge);
+		assert.deepEqual(emptyTools.tools, []);
+		assert.match(emptyTools.systemPrompt, /contact_supervisor/);
+
+		const mcpOnly = applyIntercomBridgeToAgent(makeAgent({ tools: [], mcpDirectTools: ["github/search_repositories"] }), activeBridge);
+		assert.deepEqual(mcpOnly.tools, []);
+		assert.deepEqual(mcpOnly.mcpDirectTools, ["github/search_repositories"]);
+		assert.match(mcpOnly.systemPrompt, /contact_supervisor/);
 	});
 });

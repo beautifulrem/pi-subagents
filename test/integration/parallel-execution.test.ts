@@ -12,6 +12,7 @@ import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { MockPi } from "../support/helpers.ts";
 import {
@@ -116,11 +117,12 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 	function makeExecutor(
 		agents = [makeAgent("echo")],
 		state = { baseCwd: tempDir, currentSessionId: null, asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
+		config: Record<string, unknown> = {},
 	) {
 		return createSubagentExecutor({
 			pi: { events: createEventBus(), getSessionName: () => undefined },
 			state,
-			config: {},
+			config,
 			asyncByDefault: false,
 			tempArtifactsDir: tempDir,
 			getSubagentSessionRoot: () => tempDir,
@@ -225,6 +227,40 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.equal(state.foregroundControls.size, 0);
 	});
 
+	it("exposes stable child indexes for counted top-level parallel results", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [{ type: "tool_execution_start", toolName: "read", args: { path: "a.md" } }], delay: 10 },
+				{ jsonl: [{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Counted A done" }], model: "mock/test-model", stopReason: "stop", usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: { total: 0.001 } } } }] },
+			],
+		});
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [{ type: "tool_execution_start", toolName: "read", args: { path: "b.md" } }], delay: 10 },
+				{ jsonl: [{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Counted B done" }], model: "mock/test-model", stopReason: "stop", usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: { total: 0.001 } } } }] },
+			],
+		});
+		const executor = makeExecutor();
+		const updateIndexes: number[] = [];
+
+		const result = await executor.execute(
+			"counted-parallel-indexes",
+			{ tasks: [{ agent: "echo", task: "Counted inspection", count: 2 }] },
+			new AbortController().signal,
+			(update) => {
+				for (const row of update.details?.results ?? []) updateIndexes.push(row.index);
+			},
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.deepEqual(result.details?.results.map((row: { index: number }) => row.index), [0, 1]);
+		assert.deepEqual([...new Set(result.details?.results.map((row: { index: number }) => row.index))], [0, 1]);
+		assert.ok(updateIndexes.includes(0));
+		assert.ok(updateIndexes.includes(1));
+		assert.ok(updateIndexes.every((index) => Number.isInteger(index)));
+	});
+
 	it("publishes a durable handoff before cleaning foreground parallel worktrees", { skip: !createSubagentExecutor || process.platform === "win32" ? "executor unavailable or worktree paths differ on Windows" : undefined }, async () => {
 		git(["init"]);
 		git(["config", "user.email", "test@example.com"]);
@@ -259,6 +295,44 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.equal(handoff.groups[0]!.cleanup.tasks[0]!.worktreeRemoved, true);
 		assert.equal(handoff.groups[0]!.cleanup.tasks[0]!.branchRemoved, true);
 		assert.equal(fs.existsSync(handoff.groups[0]!.cleanup.tasks[0]!.path), false);
+	});
+
+	it("keeps worktree parallel runs successful when handoff manifest writing fails", { skip: !createSubagentExecutor || process.platform === "win32" ? "executor unavailable or worktree paths differ on Windows" : undefined }, async () => {
+		git(["init"]);
+		git(["config", "user.email", "test@example.com"]);
+		git(["config", "user.name", "Test User"]);
+		fs.writeFileSync(path.join(tempDir, "tracked.txt"), "base\n", "utf-8");
+		git(["add", "tracked.txt"]);
+		git(["commit", "-m", "initial"]);
+		const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-session-"));
+		try {
+			const artifactsDir = path.join(sessionDir, "subagent-artifacts");
+			fs.mkdirSync(artifactsDir, { recursive: true });
+			fs.writeFileSync(path.join(artifactsDir, "handoffs"), "not a directory", "utf-8");
+			mockPi.onCall({ output: "Worktree task complete" });
+			const executor = makeExecutor([makeAgent("echo")], undefined, { artifactDir: "session" });
+			const ctx = {
+				...makeMinimalCtx(tempDir),
+				sessionManager: {
+					getSessionId: () => "session-123",
+					getSessionFile: () => path.join(sessionDir, "session.jsonl"),
+				},
+			};
+			const result = await executor.execute(
+				"foreground-worktree-handoff-collision",
+				{ tasks: [{ agent: "echo", task: "Work in isolation" }], worktree: true },
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			assert.equal(result.isError, undefined);
+			assert.equal(result.details?.parallelHandoff, undefined);
+			assert.match(result.content[0]?.text ?? "", /Parallel handoff unavailable:/);
+			assert.doesNotMatch(git(["worktree", "list", "--porcelain"]), /pi-parallel-/);
+		} finally {
+			fs.rmSync(sessionDir, { recursive: true, force: true });
+		}
 	});
 
 	it("treats parallel action aliases with tasks as top-level parallel execution", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {

@@ -7,6 +7,7 @@ interface MockPiResponse {
 	output?: string;
 	stderr?: string;
 	exitCode?: number;
+	signal?: NodeJS.Signals;
 	delay?: number;
 	waitForPath?: string;
 	keepAliveAfterFinalMessageMs?: number;
@@ -26,6 +27,9 @@ interface MockPiResponse {
 	matchArgIncludes?: string | string[];
 	/** Files the mock child writes to disk before emitting output, standing in for its write-tool side effects. */
 	writeFiles?: Array<{ path: string; content: string }>;
+	/** Writes the structured-output capture file without emitting a structured_output tool event. */
+	structuredOutputCapture?: unknown;
+	runtimeAcknowledgedExtensions?: unknown;
 }
 
 export interface MockPi {

@@ -47,6 +47,7 @@ describe("capability ceiling child launch enforcement", () => {
 		assert.equal(env.PI_SUBAGENT_REQUIRED_TOOLS, undefined);
 	});
 
+
 	it("does not report retained extension paths as removed tools", () => {
 		const { capabilityAudit } = buildPiArgs({
 			...base,

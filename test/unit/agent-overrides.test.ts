@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { buildBuiltinOverrideConfig, discoverAgents, discoverAgentsAll, removeBuiltinAgentOverride } from "../../src/agents/agents.ts";
+import { buildBuiltinOverrideConfig, discoverAgents, discoverAgentsAll, removeBuiltinAgentOverride, saveBuiltinAgentOverride } from "../../src/agents/agents.ts";
 
 let tempHome = "";
 let tempProject = "";
@@ -100,24 +100,63 @@ describe("builtin agent overrides", () => {
 
 	it("applies subagents.defaultThinking only when thinking is unset", () => {
 		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
-			subagents: { defaultThinking: " low " },
+			subagents: {
+				defaultThinking: " low ",
+				agentOverrides: {
+					delegate: { thinking: "xhigh" },
+				},
+			},
 		});
+		writeUserAgent(tempHome, "user-default", `---\nname: user-default\ndescription: User agent\n---\n\nUse the default.\n`);
 		writeProjectAgent(tempProject, "project-default", `---\nname: project-default\ndescription: Project agent\n---\n\nUse the default.\n`);
 		writeProjectAgent(tempProject, "explicit-off", `---\nname: explicit-off\ndescription: Explicitly disabled\nthinking: false\n---\n\nStay off.\n`);
 
 		const discovered = discoverAgentsAll(tempProject);
+		assert.equal(discovered.builtin.find((agent) => agent.name === "delegate")?.thinking, "xhigh");
+		assert.equal(discovered.builtin.find((agent) => agent.name === "reviewer")?.thinking, "high");
+		assert.equal(discovered.user.find((agent) => agent.name === "user-default")?.thinking, "low");
 		assert.equal(discovered.project.find((agent) => agent.name === "project-default")?.thinking, "low");
 		assert.equal(discovered.project.find((agent) => agent.name === "explicit-off")?.thinking, false);
 	});
 
-	it("prefers project subagents.defaultThinking and rejects malformed defaults", () => {
+	it("prefers project subagents.defaultThinking over user defaultThinking", () => {
 		fs.mkdirSync(path.join(tempProject, ".pi"), { recursive: true });
-		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), { subagents: { defaultThinking: "low" } });
-		writeJson(path.join(tempProject, ".pi", "settings.json"), { subagents: { defaultThinking: "high" } });
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
+			subagents: { defaultThinking: "low" },
+		});
+		writeJson(path.join(tempProject, ".pi", "settings.json"), {
+			subagents: { defaultThinking: "high" },
+		});
 
-		assert.equal(discoverAgents(tempProject, "both").agents.find((agent) => agent.name === "delegate")?.thinking, "high");
-		writeJson(path.join(tempProject, ".pi", "settings.json"), { subagents: { defaultThinking: "" } });
-		assert.throws(() => discoverAgents(tempProject, "both"), /invalid 'defaultThinking'/);
+		const delegate = discoverAgents(tempProject, "both").agents.find((agent) => agent.name === "delegate");
+		assert.ok(delegate);
+		assert.equal(delegate.thinking, "high");
+	});
+
+	it("preserves custom-agent thinking when disableThinking clears builtin defaults", () => {
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
+			subagents: { defaultThinking: "low", disableThinking: true },
+		});
+		writeProjectAgent(tempProject, "custom-default", `---\nname: custom-default\ndescription: Custom default\n---\n\nUse the default.\n`);
+		writeProjectAgent(tempProject, "custom-explicit", `---\nname: custom-explicit\ndescription: Custom explicit\nthinking: high\n---\n\nUse the explicit level.\n`);
+
+		const discovered = discoverAgentsAll(tempProject);
+		assert.equal(discovered.builtin.find((agent) => agent.name === "reviewer")?.thinking, undefined);
+		assert.equal(discovered.project.find((agent) => agent.name === "custom-default")?.thinking, "low");
+		assert.equal(discovered.project.find((agent) => agent.name === "custom-explicit")?.thinking, "high");
+	});
+
+	it("surfaces malformed defaultThinking settings", () => {
+		const settingsPath = path.join(tempHome, ".pi", "agent", "settings.json");
+		for (const defaultThinking of ["", 42]) {
+			writeJson(settingsPath, { subagents: { defaultThinking } });
+			assert.throws(
+				() => discoverAgents(tempProject, "both"),
+				(error: unknown) => error instanceof Error
+					&& error.message.includes(settingsPath)
+					&& error.message.includes("defaultThinking"),
+			);
+		}
 	});
 
 	it("applies subagents.defaultModel to custom agents without a frontmatter model", () => {
@@ -137,6 +176,22 @@ describe("builtin agent overrides", () => {
 		assert.equal(agents.find((agent) => agent.name === "implementer")?.model, "deepseek-v4-pro");
 		assert.equal(agents.find((agent) => agent.name === "auditor")?.model, "google/gemini-3-pro");
 		assert.equal(agents.find((agent) => agent.name === "scout-copy")?.model, "deepseek-v4-flash");
+	});
+
+	it("overrides builtin and custom agent descriptions from settings", () => {
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
+			subagents: {
+				agentOverrides: {
+					reviewer: { description: " Priced reviewer " },
+					implementer: { description: "Priced implementer" },
+				},
+			},
+		});
+		writeProjectAgent(tempProject, "implementer", `---\nname: implementer\ndescription: Original implementer\n---\n\nImplement it.\n`);
+
+		const agents = discoverAgents(tempProject, "both").agents;
+		assert.equal(agents.find((agent) => agent.name === "reviewer")?.description, "Priced reviewer");
+		assert.equal(agents.find((agent) => agent.name === "implementer")?.description, "Priced implementer");
 	});
 
 	it("applies user settings overrides to builtin agents", () => {
@@ -586,6 +641,22 @@ describe("builtin agent overrides", () => {
 		);
 	});
 
+	it("surfaces malformed description override values", () => {
+		const settingsPath = path.join(tempHome, ".pi", "agent", "settings.json");
+		for (const description of ["", 42]) {
+			writeJson(settingsPath, {
+				subagents: { agentOverrides: { reviewer: { description } } },
+			});
+			assert.throws(
+				() => discoverAgents(tempProject, "both"),
+				(error: unknown) => error instanceof Error
+					&& error.message.includes(settingsPath)
+					&& error.message.includes("reviewer")
+					&& error.message.includes("description"),
+			);
+		}
+	});
+
 	it("surfaces malformed completion guard override values", () => {
 		const settingsPath = path.join(tempHome, ".pi", "agent", "settings.json");
 		writeJson(settingsPath, {
@@ -607,9 +678,10 @@ describe("builtin agent overrides", () => {
 		);
 	});
 
-	it("builds false sentinels when an override clears builtin fields", () => {
+	it("builds description changes and false sentinels when an override clears builtin fields", () => {
 		const override = buildBuiltinOverrideConfig(
 			{
+				description: "Base description",
 				model: "openai-codex/gpt-5.4-mini",
 				fallbackModels: ["openai/gpt-5-mini"],
 				thinking: "high",
@@ -626,6 +698,7 @@ describe("builtin agent overrides", () => {
 				completionGuard: false,
 			},
 			{
+				description: "Override description",
 				model: undefined,
 				fallbackModels: undefined,
 				thinking: undefined,
@@ -644,6 +717,7 @@ describe("builtin agent overrides", () => {
 		);
 
 		assert.deepEqual(override, {
+			description: "Override description",
 			model: false,
 			fallbackModels: false,
 			thinking: false,
@@ -656,5 +730,15 @@ describe("builtin agent overrides", () => {
 			subagentOnlyExtensions: false,
 			completionGuard: true,
 		});
+		assert.ok(override);
+		fs.mkdirSync(path.join(tempProject, ".pi"), { recursive: true });
+		saveBuiltinAgentOverride(tempProject, "reviewer", "project", override);
+		assert.equal(discoverAgents(tempProject, "both").agents.find((agent) => agent.name === "reviewer")?.description, "Override description");
+
+		const whitespaceDescription = buildBuiltinOverrideConfig(
+			{ description: "Base description" },
+			{ description: "   " } as Parameters<typeof buildBuiltinOverrideConfig>[1],
+		);
+		assert.equal(whitespaceDescription, undefined);
 	});
 });

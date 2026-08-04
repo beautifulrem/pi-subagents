@@ -1,7 +1,6 @@
 {
   "name": "pi-subagents",
-  "version": "0.35.1",
-  "private": true,
+  "version": "0.40.0",
   "description": "Pi extension for delegating tasks to subagents with chains, parallel execution, and TUI clarification",
   "author": "Nico Bailon",
   "license": "MIT",
@@ -9,9 +8,17 @@
   "exports": {
     ".": "./index.ts",
     "./background-work": "./src/api/background-work.ts",
-    "./capability-ceiling": "./src/api/capability-ceiling.ts",
     "./delegation": "./src/api/delegation.ts",
+    "./capability-ceiling": "./src/api/capability-ceiling.ts",
     "./preflight": "./src/api/preflight.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicobailon/pi-subagents.git"
+  },
+  "homepage": "https://github.com/nicobailon/pi-subagents#readme",
+  "bugs": {
+    "url": "https://github.com/nicobailon/pi-subagents/issues"
   },
   "keywords": [
     "pi-package",
@@ -37,9 +44,9 @@
   ],
   "scripts": {
     "test": "npm run test:unit",
-    "test:unit": "node --import ./test/support/isolate-temp.mjs --experimental-strip-types --test test/unit/*.test.ts",
-    "test:integration": "node --import ./test/support/isolate-temp.mjs --import tsx --import ./test/support/register-loader.mjs --test test/integration/*.test.ts",
-    "test:e2e": "node --import ./test/support/isolate-temp.mjs --import tsx --import ./test/support/register-loader.mjs --test test/e2e/*.test.ts",
+    "test:unit": "node --experimental-strip-types --test test/unit/*.test.ts",
+    "test:integration": "node --experimental-strip-types --import ./test/support/register-loader.mjs --test test/integration/*.test.ts",
+    "test:e2e": "node --experimental-strip-types --import ./test/support/register-loader.mjs --test test/e2e/*.test.ts",
     "test:all": "npm run test:unit && npm run test:integration && npm run test:e2e"
   },
   "pi": {
@@ -55,7 +62,7 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
-    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-ai": ">=0.80.0",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
   },

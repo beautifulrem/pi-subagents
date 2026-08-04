@@ -153,6 +153,47 @@ body`);
 	}));
 });
 
+describe("agent aliases", () => {
+	it("parses and serializes agent aliases", () => withTempHome(() => {
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-alias-agent-"));
+		tempDirs.push(project);
+		writeAgent(path.join(project, ".pi", "agents", "worker.md"), `---
+name: worker
+description: Worker
+aliases: developer, coder, worker
+---
+body`);
+
+		const worker = discoverAgents(project, "both").agents.find((agent) => agent.name === "worker")!;
+		assert.deepEqual(worker.aliases, ["developer", "coder"]);
+		assert.match(serializeAgent(worker), /^aliases: developer, coder$/m);
+
+		const ctx = { cwd: project, modelRegistry: { getAvailable: () => [] } };
+		assert.match(handleManagementAction("list", {}, ctx).content[0]?.text ?? "", /aliases: developer, coder/);
+		assert.match(handleManagementAction("get", { agent: "developer" }, ctx).content[0]?.text ?? "", /Agent: worker/);
+	}));
+
+	it("reports management alias collisions as ambiguous", () => withTempHome(() => {
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-alias-collision-"));
+		tempDirs.push(project);
+		writeAgent(path.join(project, ".pi", "agents", "review-agent.md"), `---
+name: review-agent
+description: Custom reviewer
+aliases: developer
+---
+body`);
+
+		const ctx = { cwd: project, modelRegistry: { getAvailable: () => [] } };
+		const getResult = handleManagementAction("get", { agent: "developer" }, ctx);
+		assert.equal(getResult.isError, true);
+		assert.match(getResult.content[0]?.text ?? "", /Ambiguous agent alias or name 'developer': review-agent, worker/);
+
+		const disableResult = handleManagementAction("disable", { agent: "developer" }, ctx);
+		assert.equal(disableResult.isError, true);
+		assert.match(disableResult.content[0]?.text ?? "", /Ambiguous agent alias 'developer': worker, review-agent|Ambiguous agent alias 'developer': review-agent, worker/);
+	}));
+});
+
 describe("agent simple-scalar list frontmatter", () => {
 	it("discovers newline block lists for all list fields and routes MCP tools", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-agent-block-list-frontmatter-"));
@@ -195,6 +236,24 @@ Do work
 		assert.deepEqual(worker?.fallbackModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
 		assert.deepEqual(worker?.extensions, ["./extension-one.ts", "./extension-two.ts"]);
 		assert.deepEqual(worker?.subagentOnlyExtensions, ["./child-only.ts", "./child-helper.ts"]);
+	});
+
+	it("preserves MCP-only tools as an explicit empty builtin allowlist", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-agent-mcp-only-frontmatter-"));
+		tempDirs.push(dir);
+		writeAgent(path.join(dir, ".pi", "agents", "mcp-only.md"), `---
+name: mcp-only
+description: MCP only
+tools: mcp:github/search_repositories
+---
+
+Do MCP work
+`);
+
+		const agent = discoverAgents(dir, "project").agents.find((candidate) => candidate.name === "mcp-only");
+		assert.deepEqual(agent?.tools, []);
+		assert.deepEqual(agent?.mcpDirectTools, ["github/search_repositories"]);
+		assert.match(serializeAgent(agent!), /^tools: mcp:github\/search_repositories$/m);
 	});
 
 	it("preserves comma-separated syntax across all list fields", () => {
@@ -583,6 +642,72 @@ Review nested project work.
 		assert.ok(agent);
 		assert.equal(agent.source, "package");
 		assert.equal(agent.filePath, path.join(packageRoot, "agents", "reviewer.md"));
+	}));
+
+	it("keeps nearest project root discovery by default when a nested .pi exists", () => withTempHome(() => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-nearest-root-default-"));
+		tempDirs.push(dir);
+		const nested = path.join(dir, "packages", "app", "src");
+		const nestedConfigDir = path.join(dir, "packages", "app", ".pi");
+		const packageRoot = path.join(dir, ".pi", "npm", "node_modules", "outer-workflow");
+		fs.mkdirSync(nested, { recursive: true });
+		fs.mkdirSync(nestedConfigDir, { recursive: true });
+		fs.mkdirSync(path.join(dir, ".git"), { recursive: true });
+		writeJson(path.join(packageRoot, "package.json"), {
+			name: "outer-workflow",
+			"pi-subagents": { agents: ["./agents"] },
+		});
+		writeAgent(path.join(packageRoot, "agents", "planner.md"), `---
+name: planner
+package: outer-workflow
+description: Plan from the outer project package.
+---
+
+Plan outer project work.
+`);
+
+		const agent = discoverAgents(nested, "both").agents.find((candidate) => candidate.name === "outer-workflow.planner");
+		assert.equal(agent, undefined);
+	}));
+
+	it("can resolve project packages and overrides from the git root", () => withTempHome(() => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-git-root-resolution-"));
+		tempDirs.push(dir);
+		const nested = path.join(dir, "packages", "app", "src");
+		const nestedConfigDir = path.join(dir, "packages", "app", ".pi");
+		const packageRoot = path.join(dir, ".pi", "npm", "node_modules", "outer-workflow");
+		fs.mkdirSync(nested, { recursive: true });
+		fs.mkdirSync(nestedConfigDir, { recursive: true });
+		fs.writeFileSync(path.join(dir, ".git"), "gitdir: ../.git/worktrees/app\n", "utf-8");
+		writeJson(path.join(dir, ".pi", "settings.json"), {
+			subagents: {
+				projectRootResolution: "git-root",
+				agentOverrides: {
+					reviewer: { model: "openai/gpt-5.4" },
+				},
+			},
+		});
+		writeJson(path.join(packageRoot, "package.json"), {
+			name: "outer-workflow",
+			"pi-subagents": { agents: ["./agents"] },
+		});
+		writeAgent(path.join(packageRoot, "agents", "planner.md"), `---
+name: planner
+package: outer-workflow
+description: Plan from the outer project package.
+---
+
+Plan outer project work.
+`);
+
+		const agents = discoverAgents(nested, "both").agents;
+		const packageAgent = agents.find((candidate) => candidate.name === "outer-workflow.planner");
+		assert.ok(packageAgent);
+		assert.equal(packageAgent.source, "package");
+		assert.equal(packageAgent.filePath, path.join(packageRoot, "agents", "planner.md"));
+		const reviewer = agents.find((candidate) => candidate.name === "reviewer");
+		assert.equal(reviewer?.model, "openai/gpt-5.4");
+		assert.equal(reviewer?.override?.path, path.join(dir, ".pi", "settings.json"));
 	}));
 
 	it("does not register legacy skill files from broad package agent roots", () => withTempHome(() => {
@@ -1177,6 +1302,29 @@ Do work
 			for (const agent of builtins) {
 				assert.ok(agent.tools && agent.tools.length > 0, `${agent.name} should have explicit tools frontmatter`);
 			}
+		} finally {
+			if (previousHome === undefined) delete process.env.HOME;
+			else process.env.HOME = previousHome;
+			if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+			else process.env.USERPROFILE = previousUserProfile;
+		}
+	});
+
+	it("keeps the bundled planner read-only for repository tools", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-builtin-planner-tools-"));
+		const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-builtin-planner-home-"));
+		tempDirs.push(dir);
+		tempDirs.push(homeDir);
+		const previousHome = process.env.HOME;
+		const previousUserProfile = process.env.USERPROFILE;
+
+		try {
+			process.env.HOME = homeDir;
+			process.env.USERPROFILE = homeDir;
+			const planner = discoverAgentsAll(dir).builtin.find((agent) => agent.name === "planner");
+			assert.ok(planner, "planner builtin should be discovered");
+			assert.deepEqual(planner.tools, ["read", "grep", "find", "ls", "intercom"]);
+			assert.equal(planner.acceptanceRole, "read-only");
 		} finally {
 			if (previousHome === undefined) delete process.env.HOME;
 			else process.env.HOME = previousHome;

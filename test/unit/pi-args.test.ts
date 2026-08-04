@@ -7,7 +7,7 @@ import { computeMcpServerHash } from "../../src/runs/shared/mcp-direct-tool-allo
 import { TOOL_BUDGET_ENV, TOOL_BUDGET_ZERO_AUTH_ENV } from "../../src/runs/shared/tool-budget.ts";
 import { WAIT_TOOL_ENABLED_ENV } from "../../src/runs/background/wait-config.ts";
 import { PI_CODING_AGENT_PACKAGE_ROOT_ENV } from "../../src/shared/utils.ts";
-import { CHILD_TOOL_DIAGNOSTIC_PATH_ENV, REQUIRED_CHILD_TOOLS_ENV } from "../../src/runs/shared/tool-availability.ts";
+import { CHILD_TOOL_DIAGNOSTIC_PATH_ENV, MCP_DIRECT_CHILD_TOOLS_ENV, REQUIRED_CHILD_TOOLS_ENV } from "../../src/runs/shared/tool-availability.ts";
 import { CHILD_WATCHDOG_CONFIG_ENV } from "../../src/watchdog/child-status.ts";
 import {
 	SUBAGENT_FANOUT_CHILD_ENV,
@@ -23,8 +23,12 @@ import {
 	SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV,
 	SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV,
 	SUBAGENT_RUN_ID_ENV,
+	PI_INTERCOM_STABLE_ID_ENV,
+	PI_INTERCOM_SESSION_ID_ENV,
 	applyThinkingSuffix,
 	buildPiArgs,
+	projectLaunchResolvedChildExtensions,
+	resolvePiLaunchToolPlan,
 } from "../../src/runs/shared/pi-args.ts";
 
 const originalEnv = {
@@ -42,8 +46,13 @@ const originalEnv = {
 	PI_SUBAGENT_PARENT_CAPABILITY_TOKEN: process.env.PI_SUBAGENT_PARENT_CAPABILITY_TOKEN,
 	PI_SUBAGENT_PARENT_SESSION: process.env.PI_SUBAGENT_PARENT_SESSION,
 	PI_SUBAGENT_RUN_ID: process.env.PI_SUBAGENT_RUN_ID,
+	[MCP_DIRECT_CHILD_TOOLS_ENV]: process.env[MCP_DIRECT_CHILD_TOOLS_ENV],
 	[TOOL_BUDGET_ZERO_AUTH_ENV]: process.env[TOOL_BUDGET_ZERO_AUTH_ENV],
 	[PI_CODING_AGENT_PACKAGE_ROOT_ENV]: process.env[PI_CODING_AGENT_PACKAGE_ROOT_ENV],
+	[PI_INTERCOM_STABLE_ID_ENV]: process.env[PI_INTERCOM_STABLE_ID_ENV],
+	[PI_INTERCOM_SESSION_ID_ENV]: process.env[PI_INTERCOM_SESSION_ID_ENV],
+	MCP_HASH_ROOT: process.env.MCP_HASH_ROOT,
+	MCP_HASH_TOKEN: process.env.MCP_HASH_TOKEN,
 };
 const originalCwd = process.cwd();
 const tempRoots: string[] = [];
@@ -125,6 +134,29 @@ afterEach(() => {
 });
 
 describe("buildPiArgs session wiring", () => {
+	it("projects launch-resolved extension identifiers without raw paths", () => {
+		const privateExt = path.join(os.tmpdir(), "private-extension-root", "secret-extension.ts");
+		const toolExt = path.join(os.tmpdir(), "tool-extension-root", "tool-extension.ts");
+		const plan = resolvePiLaunchToolPlan({
+			tools: ["read", toolExt],
+			extensions: [privateExt],
+			subagentOnlyExtensions: ["package-extension"],
+		});
+
+		const projection = projectLaunchResolvedChildExtensions(plan);
+
+		assert.equal(projection.version, 1);
+		assert.equal(projection.source, "launch-resolved");
+		assert.equal(projection.disableAmbientExtensions, true);
+		assert.equal(projection.runtime.length, 1);
+		assert.equal(projection.configured.length, 3);
+		assert.equal(projection.effective.length, 4);
+		for (const id of [...projection.runtime, ...projection.configured, ...projection.effective]) {
+			assert.match(id, /^sha256:[a-f0-9]{16}$/);
+		}
+		assert.ok(!JSON.stringify(projection).includes(os.tmpdir()), "projection should not expose raw extension paths");
+	});
+
 	it("uses --session when sessionFile is provided", () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-args-session-"));
 		try {
@@ -414,9 +446,22 @@ describe("buildPiArgs system prompt mode wiring", () => {
 
 		const extensionArgs = args.filter((arg, index) => args[index - 1] === "--extension");
 		assert.ok(extensionArgs.some((arg) => arg.endsWith(path.join("src", "runs", "shared", "subagent-prompt-runtime.ts"))));
+		assert.ok(args.includes("--no-context-files"));
 		assert.equal(env.PI_SUBAGENT_CHILD, "1");
 		assert.equal(env.PI_SUBAGENT_INHERIT_PROJECT_CONTEXT, "0");
 		assert.equal(env.PI_SUBAGENT_INHERIT_SKILLS, "1");
+	});
+
+	it("keeps context file loading enabled when project context is inherited", () => {
+		const { args } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			inheritProjectContext: true,
+			inheritSkills: true,
+		});
+
+		assert.equal(args.includes("--no-context-files"), false);
 	});
 
 	it("passes tool budget through env", () => {
@@ -457,7 +502,25 @@ describe("buildPiArgs system prompt mode wiring", () => {
 		assert.equal(owned.env[TOOL_BUDGET_ZERO_AUTH_ENV], "1");
 	});
 
+	it("clears inherited MCP direct-tool metadata for non-MCP launches", () => {
+		for (const staleValue of [JSON.stringify(["fixture_search"]), "not-json"]) {
+			process.env[MCP_DIRECT_CHILD_TOOLS_ENV] = staleValue;
+			const { env } = buildPiArgs({
+				baseArgs: ["-p"],
+				task: "hello",
+				sessionEnabled: false,
+				inheritProjectContext: false,
+				inheritSkills: false,
+				tools: ["read", "fixture_search"],
+			});
+
+			assert.equal(env[MCP_DIRECT_CHILD_TOOLS_ENV], undefined);
+		}
+	});
+
 	it("passes child intercom and orchestrator metadata through env", () => {
+		process.env[PI_INTERCOM_STABLE_ID_ENV] = "subagent-chat-parent";
+		process.env[PI_INTERCOM_SESSION_ID_ENV] = "session-parent-runtime";
 		const { env } = buildPiArgs({
 			baseArgs: ["-p"],
 			task: "hello",
@@ -473,6 +536,8 @@ describe("buildPiArgs system prompt mode wiring", () => {
 		});
 
 		assert.equal(env.PI_SUBAGENT_INTERCOM_SESSION_NAME, "subagent-worker-78f659a3");
+		assert.equal(env[PI_INTERCOM_STABLE_ID_ENV], "subagent-worker-78f659a3");
+		assert.equal(env[PI_INTERCOM_SESSION_ID_ENV], undefined);
 		assert.equal(env.PI_SUBAGENT_ORCHESTRATOR_TARGET, "subagent-chat-parent");
 		assert.equal(env[SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV], "session-parent-123");
 		assert.equal(env.PI_SUBAGENT_RUN_ID, "78f659a3");
@@ -480,6 +545,21 @@ describe("buildPiArgs system prompt mode wiring", () => {
 		assert.equal(env.PI_SUBAGENT_CHILD_INDEX, "2");
 		assert.equal(typeof env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV], "string");
 		assert.match(env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV] ?? "", /supervisor-channels/);
+	});
+
+	it("clears inherited pi-intercom identity when no child intercom session name is set", () => {
+		process.env[PI_INTERCOM_STABLE_ID_ENV] = "subagent-chat-parent";
+		process.env[PI_INTERCOM_SESSION_ID_ENV] = "session-parent-runtime";
+		const { env } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			inheritProjectContext: true,
+			inheritSkills: true,
+		});
+
+		assert.equal(env[PI_INTERCOM_STABLE_ID_ENV], undefined);
+		assert.equal(env[PI_INTERCOM_SESSION_ID_ENV], undefined);
 	});
 
 	it("does not create a supervisor channel without an exact parent session id", () => {
@@ -575,6 +655,46 @@ describe("buildPiArgs system prompt mode wiring", () => {
 		assert.equal(args[args.indexOf("--tools") + 1], "read,bash");
 	});
 
+	it("includes adapter tool filters in MCP cache identity", () => {
+		const base = { command: "npx", args: ["browser-mcp"] };
+
+		assert.notEqual(
+			computeMcpServerHash(base),
+			computeMcpServerHash({ ...base, includeTools: ["browser_navigate"] }),
+		);
+	});
+
+	it("matches pi-mcp-adapter 2.15.0 metadata cache hashes", () => {
+		process.env.MCP_HASH_ROOT = "/tmp/mcp-root";
+		process.env.MCP_HASH_TOKEN = "token-value";
+
+		assert.deepEqual(
+			[
+				computeMcpServerHash({
+					command: "npx",
+					args: ["-y", "browser-mcp"],
+					env: { ROOT: "{env:MCP_HASH_ROOT}", SECRET_COMMAND: "!op read test" },
+					cwd: "${MCP_HASH_ROOT}/server",
+					exposeResources: false,
+					includeTools: ["browser_navigate"],
+					excludeTools: ["browser_close"],
+				}),
+				computeMcpServerHash({
+					url: "https://example.test/$env:MCP_HASH_TOKEN",
+					headers: { Authorization: "Bearer ${MCP_HASH_TOKEN}", Secret: "!op read test" },
+					auth: "bearer",
+					bearerTokenEnv: "MCP_HASH_TOKEN",
+				}),
+				computeMcpServerHash({ socket: "{env:MCP_HASH_ROOT}/rmcp.sock" }),
+			],
+			[
+				"8af47bd5a801f42bd252789826df883c6f4db6f1d425b82f8561d75063fbe3a8",
+				"77db141e556d24c3740a4b4f0cd50d8c23309a28062282cc1ca724207359ef5a",
+				"77f7f77a3e8df990d8c78e99ca81508fd8d1f954e814ee7cbfa46719f71eb46b",
+			],
+		);
+	});
+
 	it("augments explicit builtin allowlists with selected direct MCP tool names", () => {
 		const fixture = createMcpFixture();
 		writeMcpFixture(fixture);
@@ -591,34 +711,29 @@ describe("buildPiArgs system prompt mode wiring", () => {
 
 		assert.equal(args[args.indexOf("--tools") + 1], "read,bash,chrome_devtools_take_screenshot,chrome_devtools_click");
 		assert.equal(env.MCP_DIRECT_TOOLS, "chrome-devtools");
+		assert.equal(env[REQUIRED_CHILD_TOOLS_ENV], JSON.stringify(["read", "bash", "chrome_devtools_take_screenshot", "chrome_devtools_click"]));
+		assert.equal(env[MCP_DIRECT_CHILD_TOOLS_ENV], JSON.stringify(["chrome_devtools_take_screenshot", "chrome_devtools_click"]));
 	});
 
 	it("emits --no-tools for explicit empty tool allowlists", () => {
-		const withoutSkills = buildPiArgs({
-			baseArgs: ["-p"],
-			task: "hello",
-			sessionEnabled: false,
-			inheritProjectContext: false,
-			inheritSkills: false,
-			tools: [],
-		});
-		assert.ok(withoutSkills.args.includes("--no-tools"));
-		assert.equal(withoutSkills.args.includes("--tools"), false);
-
-		const withSkills = buildPiArgs({
+		for (const requireReadTool of [false, true]) {
+			const { args, env } = buildPiArgs({
 				baseArgs: ["-p"],
 				task: "hello",
 				sessionEnabled: false,
 				inheritProjectContext: false,
 				inheritSkills: false,
-				requireReadTool: true,
+				requireReadTool,
 				tools: [],
-		});
-		assert.equal(withSkills.args[withSkills.args.indexOf("--tools") + 1], "read");
-		assert.deepEqual(JSON.parse(withSkills.env[REQUIRED_CHILD_TOOLS_ENV] ?? "[]"), ["read"]);
+			});
+
+			assert.ok(args.includes("--no-tools"));
+			assert.equal(args.includes("--tools"), false);
+			assert.equal(env.MCP_DIRECT_TOOLS, "__none__");
+		}
 	});
 
-	it("preserves ambient builtins for MCP-only agents", () => {
+	it("restricts MCP-only agents to selected direct MCP tool names", () => {
 		for (const requireReadTool of [false, true]) {
 			const fixture = createMcpFixture();
 			writeMcpFixture(fixture);
@@ -633,14 +748,12 @@ describe("buildPiArgs system prompt mode wiring", () => {
 				mcpDirectTools: ["chrome-devtools"],
 			});
 
-			assert.equal(args.includes("--tools"), false);
-			assert.equal(args.includes("--no-tools"), false);
+			assert.equal(args[args.indexOf("--tools") + 1], "chrome_devtools_take_screenshot,chrome_devtools_click");
 			assert.equal(env.MCP_DIRECT_TOOLS, "chrome-devtools");
-			assert.deepEqual(JSON.parse(env[REQUIRED_CHILD_TOOLS_ENV] ?? "[]"), ["chrome_devtools_take_screenshot", "chrome_devtools_click"]);
 		}
 	});
 
-	it("preserves ambient builtins when MCP-only names cannot be resolved", () => {
+	it("fails closed with --no-tools when MCP-only names cannot be resolved", () => {
 		for (const requireReadTool of [false, true]) {
 			const fixture = createMcpFixture();
 			writeJson(path.join(fixture.agentDir, "mcp.json"), {
@@ -657,26 +770,10 @@ describe("buildPiArgs system prompt mode wiring", () => {
 				mcpDirectTools: ["chrome-devtools"],
 			});
 
-			assert.equal(args.includes("--no-tools"), false);
+			assert.ok(args.includes("--no-tools"));
 			assert.equal(args.includes("--tools"), false);
 			assert.equal(env.MCP_DIRECT_TOOLS, "chrome-devtools");
 		}
-	});
-
-	it("preserves ambient builtins for path-only tool extensions needed alongside skills", () => {
-		const { args } = buildPiArgs({
-			baseArgs: ["-p"],
-			task: "hello",
-			sessionEnabled: false,
-			inheritProjectContext: false,
-			inheritSkills: false,
-			requireReadTool: true,
-			tools: ["/tmp/custom-tools.ts"],
-		});
-
-		assert.equal(args.includes("--tools"), false);
-		assert.equal(args.includes("--no-tools"), false);
-		assert.ok(args.includes("/tmp/custom-tools.ts"));
 	});
 
 	it("supports direct MCP server/tool filters", () => {

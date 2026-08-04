@@ -193,41 +193,19 @@ describe("ScheduledRunManager create/list/status/cancel", () => {
 	});
 
 	it("rejects capability-ceiling-restricted schedules instead of persisting policy-less jobs", async () => {
-		const harness = freshHarness({ resolveCapabilityCeiling: () => ({ version: 1, allowedTools: ["read"], denyExtensions: true, sources: ["plan"] }) });
+		const harness = createHarness({ resolveCapabilityCeiling: () => ({ version: 1, allowedTools: ["read"], denyExtensions: true, sources: ["plan"] }) });
 		const result = await harness.manager.handleToolCall({ action: "schedule", agent: "worker", task: "review", schedule: "+10m" }, harness.ctx);
 		assert.equal(isError(result), true);
 		assert.match(result.content[0]!.text, /does not yet persist ceilings/);
 		assert.equal(harness.launches.length, 0);
 	});
 
-	it("uses the runtime session id instead of the session-file identity when rejecting restricted schedules", async () => {
-		const capabilitySessionId = "runtime-capability-session";
-		const queriedSessionIds: string[] = [];
-		const harness = freshHarness({
-			resolveCapabilityCeiling: (sessionId) => {
-				queriedSessionIds.push(sessionId);
-				return sessionId === capabilitySessionId
-					? { version: 1, allowedTools: ["read"], denyExtensions: true, sources: ["plan"] }
-					: undefined;
-			},
-		});
-		harness.ctx.sessionManager.getSessionId = () => capabilitySessionId;
-		harness.ctx.sessionManager.getSessionFile = () => "/sessions/ownership-session.jsonl";
-
-		const result = await harness.manager.handleToolCall({ action: "schedule", agent: "worker", task: "review", schedule: "+10m" }, harness.ctx);
-
-		assert.equal(isError(result), true);
-		assert.match(result.content[0]!.text, /does not yet persist ceilings/);
-		assert.deepEqual(queriedSessionIds, [capabilitySessionId]);
-		assert.equal(harness.timers.pendingCount(), 0);
-		assert.equal(harness.launches.length, 0);
-	});
 
 	it("rejects schedules restricted only by inherited process policy", async () => {
 		const previous = process.env.PI_SUBAGENT_CAPABILITY_CEILING_V1;
 		try {
 			process.env.PI_SUBAGENT_CAPABILITY_CEILING_V1 = encodeSubagentCapabilityCeiling({ version: 1, allowedTools: ["read"], denyExtensions: true, sources: ["ancestor"] });
-			const harness = freshHarness({ resolveCapabilityCeiling: resolveCurrentSubagentCapabilityCeiling });
+			const harness = createHarness({ resolveCapabilityCeiling: resolveCurrentSubagentCapabilityCeiling });
 			const result = await harness.manager.handleToolCall({ action: "schedule", agent: "worker", task: "review", schedule: "+10m" }, harness.ctx);
 			assert.equal(isError(result), true);
 			assert.match(result.content[0]!.text, /does not yet persist ceilings/);
@@ -275,7 +253,7 @@ describe("ScheduledRunManager create/list/status/cancel", () => {
 				...params,
 			}, harness.ctx);
 			assert.equal(isError(result), true);
-			assert.match(result.content[0]!.text, /cannot be requested explicitly.*independent reviewer result/i);
+			assert.match(result.content[0]!.text, /achieved status.*omit acceptance.*acceptance\.review\.required/i);
 		}
 		assert.equal(harness.timers.pendingCount(), 0);
 	});

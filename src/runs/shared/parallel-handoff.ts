@@ -1,8 +1,17 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
-import type { ParallelHandoffGroup, ParallelHandoffManifest, ParallelHandoffReference, SubagentResultStatus } from "../../shared/types.ts";
-import type { WorktreeCleanupReport, WorktreeDiff, WorktreeSetup } from "./worktree.ts";
+import type {
+	ParallelHandoffGroup,
+	ParallelHandoffManifest,
+	ParallelHandoffReference,
+	SubagentResultStatus,
+} from "../../shared/types.ts";
+import type {
+	WorktreeCleanupReport,
+	WorktreeDiff,
+	WorktreeSetup,
+} from "./worktree.ts";
 
 export interface ParallelHandoffResult {
 	agent: string;
@@ -17,7 +26,9 @@ export interface ParallelHandoffResult {
 function readManifest(manifestPath: string): ParallelHandoffManifest | undefined {
 	if (!fs.existsSync(manifestPath)) return undefined;
 	const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf-8")) as ParallelHandoffManifest;
-	if (parsed.version !== 1 || !Array.isArray(parsed.groups)) throw new Error(`Invalid parallel handoff manifest: ${manifestPath}`);
+	if (parsed.version !== 1 || !Array.isArray(parsed.groups)) {
+		throw new Error(`Invalid parallel handoff manifest: ${manifestPath}`);
+	}
 	return parsed;
 }
 
@@ -82,7 +93,13 @@ export function writeParallelHandoffGroup(input: {
 		baseCommit: input.setup.baseCommit,
 		repoRoot: input.setup.cwd,
 		children: input.results.map((result, taskIndex) => {
-			const diff = input.diffs[taskIndex] ?? missingDiff({ manifestPath: input.manifestPath, stepIndex: input.stepIndex, taskIndex, agent: result.agent, branch: input.setup.worktrees[taskIndex]?.branch });
+			const diff = input.diffs[taskIndex] ?? missingDiff({
+				manifestPath: input.manifestPath,
+				stepIndex: input.stepIndex,
+				taskIndex,
+				agent: result.agent,
+				branch: input.setup.worktrees[taskIndex]?.branch,
+			});
 			return {
 				index: input.flatStartIndex + taskIndex,
 				taskIndex,

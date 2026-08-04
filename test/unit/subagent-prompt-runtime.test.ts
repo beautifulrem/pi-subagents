@@ -16,9 +16,10 @@ import {
 	SUBAGENT_STEER_INBOX_ENV,
 	SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV,
 } from "../../src/runs/shared/pi-args.ts";
+import { RUNTIME_EXTENSION_ACK_EVENT, RUNTIME_EXTENSION_ACK_PATH_ENV } from "../../src/runs/shared/runtime-acknowledged-extensions.ts";
 import { STRUCTURED_OUTPUT_CAPTURE_ENV, STRUCTURED_OUTPUT_SCHEMA_ENV } from "../../src/runs/shared/structured-output.ts";
-import { TOOL_BUDGET_ENV, TOOL_BUDGET_OFFSET_ENV } from "../../src/runs/shared/tool-budget.ts";
-import { CHILD_TOOL_DIAGNOSTIC_PATH_ENV, readChildToolDiagnostic, REQUIRED_CHILD_TOOLS_ENV } from "../../src/runs/shared/tool-availability.ts";
+import { TOOL_BUDGET_ENV } from "../../src/runs/shared/tool-budget.ts";
+import { CHILD_TOOL_DIAGNOSTIC_PATH_ENV, formatChildToolDiagnostic, MCP_DIRECT_CHILD_TOOLS_ENV, readChildToolDiagnostic, REQUIRED_CHILD_TOOLS_ENV } from "../../src/runs/shared/tool-availability.ts";
 import { CHILD_WATCHDOG_CONFIG_ENV } from "../../src/watchdog/child-status.ts";
 import { SUBAGENT_WATCHDOG_WARNING_TYPE } from "../../src/watchdog/types.ts";
 import registerSubagentPromptRuntime, {
@@ -43,9 +44,11 @@ const envSnapshot = {
 	PI_SUBAGENT_STEER_ACK_DIR: process.env.PI_SUBAGENT_STEER_ACK_DIR,
 	PI_SUBAGENT_STRUCTURED_OUTPUT_CAPTURE: process.env.PI_SUBAGENT_STRUCTURED_OUTPUT_CAPTURE,
 	PI_SUBAGENT_STRUCTURED_OUTPUT_SCHEMA: process.env.PI_SUBAGENT_STRUCTURED_OUTPUT_SCHEMA,
+	PI_SUBAGENT_RUNTIME_ACKNOWLEDGED_EXTENSIONS: process.env.PI_SUBAGENT_RUNTIME_ACKNOWLEDGED_EXTENSIONS,
 	PI_SUBAGENT_TOOL_BUDGET: process.env.PI_SUBAGENT_TOOL_BUDGET,
 	PI_SUBAGENT_TOOL_BUDGET_OFFSET: process.env.PI_SUBAGENT_TOOL_BUDGET_OFFSET,
 	PI_SUBAGENT_REQUIRED_TOOLS: process.env.PI_SUBAGENT_REQUIRED_TOOLS,
+	PI_SUBAGENT_MCP_DIRECT_TOOLS: process.env.PI_SUBAGENT_MCP_DIRECT_TOOLS,
 	PI_SUBAGENT_TOOL_DIAGNOSTIC_PATH: process.env.PI_SUBAGENT_TOOL_DIAGNOSTIC_PATH,
 	PI_SUBAGENT_ORCHESTRATOR_TARGET: process.env.PI_SUBAGENT_ORCHESTRATOR_TARGET,
 	PI_SUBAGENT_ORCHESTRATOR_SESSION_ID: process.env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID,
@@ -98,12 +101,16 @@ afterEach(() => {
 	else process.env[STRUCTURED_OUTPUT_CAPTURE_ENV] = envSnapshot.PI_SUBAGENT_STRUCTURED_OUTPUT_CAPTURE;
 	if (envSnapshot.PI_SUBAGENT_STRUCTURED_OUTPUT_SCHEMA === undefined) delete process.env[STRUCTURED_OUTPUT_SCHEMA_ENV];
 	else process.env[STRUCTURED_OUTPUT_SCHEMA_ENV] = envSnapshot.PI_SUBAGENT_STRUCTURED_OUTPUT_SCHEMA;
+	if (envSnapshot.PI_SUBAGENT_RUNTIME_ACKNOWLEDGED_EXTENSIONS === undefined) delete process.env[RUNTIME_EXTENSION_ACK_PATH_ENV];
+	else process.env[RUNTIME_EXTENSION_ACK_PATH_ENV] = envSnapshot.PI_SUBAGENT_RUNTIME_ACKNOWLEDGED_EXTENSIONS;
 	if (envSnapshot.PI_SUBAGENT_TOOL_BUDGET === undefined) delete process.env[TOOL_BUDGET_ENV];
 	else process.env[TOOL_BUDGET_ENV] = envSnapshot.PI_SUBAGENT_TOOL_BUDGET;
 	if (envSnapshot.PI_SUBAGENT_TOOL_BUDGET_OFFSET === undefined) delete process.env[TOOL_BUDGET_OFFSET_ENV];
 	else process.env[TOOL_BUDGET_OFFSET_ENV] = envSnapshot.PI_SUBAGENT_TOOL_BUDGET_OFFSET;
 	if (envSnapshot.PI_SUBAGENT_REQUIRED_TOOLS === undefined) delete process.env[REQUIRED_CHILD_TOOLS_ENV];
 	else process.env[REQUIRED_CHILD_TOOLS_ENV] = envSnapshot.PI_SUBAGENT_REQUIRED_TOOLS;
+	if (envSnapshot.PI_SUBAGENT_MCP_DIRECT_TOOLS === undefined) delete process.env[MCP_DIRECT_CHILD_TOOLS_ENV];
+	else process.env[MCP_DIRECT_CHILD_TOOLS_ENV] = envSnapshot.PI_SUBAGENT_MCP_DIRECT_TOOLS;
 	if (envSnapshot.PI_SUBAGENT_TOOL_DIAGNOSTIC_PATH === undefined) delete process.env[CHILD_TOOL_DIAGNOSTIC_PATH_ENV];
 	else process.env[CHILD_TOOL_DIAGNOSTIC_PATH_ENV] = envSnapshot.PI_SUBAGENT_TOOL_DIAGNOSTIC_PATH;
 	if (envSnapshot.PI_SUBAGENT_ORCHESTRATOR_TARGET === undefined) delete process.env[SUBAGENT_ORCHESTRATOR_TARGET_ENV];
@@ -132,6 +139,42 @@ function setSupervisorEnv(): void {
 }
 
 describe("subagent prompt runtime", () => {
+	it("collects runtime extension acknowledgements until terminal serialization", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-runtime-ack-"));
+		try {
+			const outputPath = path.join(dir, "acks.json");
+			process.env[RUNTIME_EXTENSION_ACK_PATH_ENV] = outputPath;
+			const runtimeHandlers = new Map<string, Array<(payload?: unknown) => unknown>>();
+			const extensionHandlers = new Map<string, Array<(payload?: unknown) => unknown>>();
+			const pushHandler = (target: Map<string, Array<(payload?: unknown) => unknown>>, event: string, handler: (payload?: unknown) => unknown): void => {
+				target.set(event, [...(target.get(event) ?? []), handler]);
+			};
+			const emitAll = (target: Map<string, Array<(payload?: unknown) => unknown>>, event: string, payload?: unknown): void => {
+				for (const handler of target.get(event) ?? []) handler(payload);
+			};
+
+			registerSubagentPromptRuntime({
+				events: { on(event: string, handler: (payload?: unknown) => unknown) { pushHandler(extensionHandlers, event, handler); } },
+				on(event: string, handler: (payload?: unknown) => unknown) { pushHandler(runtimeHandlers, event, handler); },
+			} as never);
+
+			emitAll(extensionHandlers, RUNTIME_EXTENSION_ACK_EVENT, { id: "ext.one" });
+			emitAll(extensionHandlers, RUNTIME_EXTENSION_ACK_EVENT, { id: "ext.one" });
+			emitAll(extensionHandlers, RUNTIME_EXTENSION_ACK_EVENT, { id: "bad/path" });
+			runtimeHandlers.get("agent_end")?.[0]?.({});
+			emitAll(extensionHandlers, RUNTIME_EXTENSION_ACK_EVENT, { id: "late" });
+
+			assert.deepEqual(JSON.parse(fs.readFileSync(outputPath, "utf-8")), {
+				version: 1,
+				source: "child-runtime",
+				ids: ["ext.one"],
+				omitted: 0,
+			});
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("nudges after the tool budget soft limit and blocks configured tools after hard", () => {
 		const handlers = new Map<string, (payload: { toolName?: string }) => unknown>();
 		const sent: string[] = [];
@@ -320,6 +363,10 @@ describe("subagent prompt runtime", () => {
 	});
 
 	it("registers child watchdog lifecycle handlers only when enabled by env", () => {
+		delete process.env[CHILD_WATCHDOG_CONFIG_ENV];
+		// Clear the ack capture env explicitly: when this test suite itself runs inside a
+		// pi-subagents child, the runner sets it and an extra agent_end handler registers.
+		delete process.env[RUNTIME_EXTENSION_ACK_PATH_ENV];
 		const handlersWithout = new Map<string, unknown[]>();
 		registerSubagentPromptRuntime({
 			on(event: string, handler: unknown) {
@@ -366,18 +413,62 @@ describe("subagent prompt runtime", () => {
 			process.env[STRUCTURED_OUTPUT_SCHEMA_ENV] = schemaPath;
 			process.env[STRUCTURED_OUTPUT_CAPTURE_ENV] = outputPath;
 			let execute: ((_id: string, params: { value: unknown }) => Promise<{ terminate?: boolean }>) | undefined;
+			let parameters: unknown;
 
 			registerSubagentPromptRuntime({
-				registerTool(tool: { name: string; execute: (_id: string, params: { value: unknown }) => Promise<{ terminate?: boolean }> }) {
-					if (tool.name === "structured_output") execute = tool.execute;
+				registerTool(tool: { name: string; parameters: unknown; execute: (_id: string, params: { value: unknown }) => Promise<{ terminate?: boolean }> }) {
+					if (tool.name === "structured_output") {
+						execute = tool.execute;
+						parameters = tool.parameters;
+					}
 				},
 				on() {},
-			} as { registerTool(tool: { name: string; execute: (_id: string, params: { value: unknown }) => Promise<{ terminate?: boolean }> }): void; on(): void });
+			} as { registerTool(tool: { name: string; parameters: unknown; execute: (_id: string, params: { value: unknown }) => Promise<{ terminate?: boolean }> }): void; on(): void });
 
 			assert.ok(execute, "structured_output tool should be registered");
+			assert.deepEqual(parameters, {
+				type: "object",
+				properties: { value: { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } } },
+				required: ["value"],
+				additionalProperties: false,
+			});
 			const result = await execute("tool-1", { value: { ok: true } });
 			assert.equal(result.terminate, true);
 			assert.deepEqual(JSON.parse(fs.readFileSync(outputPath, "utf-8")), { ok: true });
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("scopes local structured_output schema refs under the value parameter", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-structured-refs-"));
+		try {
+			const schemaPath = path.join(dir, "schema.json");
+			const outputPath = path.join(dir, "output.json");
+			fs.writeFileSync(schemaPath, JSON.stringify({
+				$defs: { item: { type: "string" } },
+				type: "object",
+				properties: {
+					name: { $ref: "#/$defs/item" },
+					nested: {
+						type: "object",
+						properties: { label: { $ref: "#/$defs/item" } },
+					},
+				},
+			}), "utf-8");
+			process.env[STRUCTURED_OUTPUT_SCHEMA_ENV] = schemaPath;
+			process.env[STRUCTURED_OUTPUT_CAPTURE_ENV] = outputPath;
+			let parameters = {} as { properties?: { value?: { properties?: { name?: { $ref?: string }; nested?: { properties?: { label?: { $ref?: string } } } } } } };
+
+			registerSubagentPromptRuntime({
+				registerTool(tool: { name: string; parameters: unknown }) {
+					if (tool.name === "structured_output") parameters = tool.parameters as typeof parameters;
+				},
+				on() {},
+			} as { registerTool(tool: { name: string; parameters: unknown }): void; on(): void });
+
+			assert.equal(parameters.properties?.value?.properties?.name?.$ref, "#/properties/value/$defs/item");
+			assert.equal(parameters.properties?.value?.properties?.nested?.properties?.label?.$ref, "#/properties/value/$defs/item");
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
@@ -576,7 +667,7 @@ describe("subagent prompt runtime", () => {
 		assert.deepEqual(registered, ["subagent_wait"]);
 	});
 
-	it("registers native intercom before checking a strict allowlist", () => {
+	it("registers native intercom before the final strict allowlist check", () => {
 		setSupervisorEnv();
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-intercom-diagnostic-"));
 		try {
@@ -599,6 +690,7 @@ describe("subagent prompt runtime", () => {
 
 			handlers.get("session_start")?.({});
 			assert.deepEqual(registered, ["subagent_wait", "contact_supervisor", "intercom"]);
+			handlers.get("agent_start")?.({});
 			assert.equal(fs.existsSync(diagnosticPath), false);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
@@ -628,27 +720,34 @@ describe("subagent prompt runtime", () => {
 
 	it("registers native supervisor tools at runtime when pi-intercom is absent", async () => {
 		setSupervisorEnv();
+		const previousRequiredTools = process.env[REQUIRED_CHILD_TOOLS_ENV];
+		delete process.env[REQUIRED_CHILD_TOOLS_ENV];
 		const handlers = new Map<string, (payload?: unknown) => unknown>();
 		const registered: string[] = [];
 
-		registerSubagentPromptRuntime({
-			on(event: string, handler: (payload?: unknown) => unknown) {
-				handlers.set(event, handler);
-			},
-			getAllTools: () => registered.map((name) => ({ name })),
-			registerTool(tool: { name: string }) {
-				registered.push(tool.name);
-			},
-		} as { on(event: string, handler: (payload?: unknown) => unknown): void; getAllTools(): Array<{ name: string }>; registerTool(tool: { name: string }): void });
+		try {
+			registerSubagentPromptRuntime({
+				on(event: string, handler: (payload?: unknown) => unknown) {
+					handlers.set(event, handler);
+				},
+				getAllTools: () => registered.map((name) => ({ name })),
+				registerTool(tool: { name: string }) {
+					registered.push(tool.name);
+				},
+			} as { on(event: string, handler: (payload?: unknown) => unknown): void; getAllTools(): Array<{ name: string }>; registerTool(tool: { name: string }): void });
 
-		handlers.get("session_start")?.({});
-		assert.deepEqual(registered, ["subagent_wait", "contact_supervisor"]);
+			handlers.get("session_start")?.({});
+			assert.deepEqual(registered, ["subagent_wait", "contact_supervisor"]);
 
-		await handlers.get("before_agent_start")?.({ systemPrompt: BASE_PROMPT });
-		assert.deepEqual(registered, ["subagent_wait", "contact_supervisor", "intercom"]);
+			await handlers.get("before_agent_start")?.({ systemPrompt: BASE_PROMPT });
+			assert.deepEqual(registered, ["subagent_wait", "contact_supervisor", "intercom"]);
+		} finally {
+			if (previousRequiredTools === undefined) delete process.env[REQUIRED_CHILD_TOOLS_ENV];
+			else process.env[REQUIRED_CHILD_TOOLS_ENV] = previousRequiredTools;
+		}
 	});
 
-	it("records and explains requested tools missing from the child registry", async () => {
+	it("records requested tools missing from the child registry after startup hooks settle", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-tool-diagnostic-"));
 		try {
 			const diagnosticPath = path.join(dir, "tools.json");
@@ -663,22 +762,89 @@ describe("subagent prompt runtime", () => {
 					handlers.set(event, handler);
 				},
 				getAllTools: () => available.map((name) => ({ name })),
-			} as { on(event: string, handler: (payload?: unknown) => unknown): void; getAllTools(): Array<{ name: string }> });
+				registerTool() {},
+			} as { on(event: string, handler: (payload?: unknown) => unknown): void; getAllTools(): Array<{ name: string }>; registerTool(): void });
 
-			const missing = await handlers.get("before_agent_start")?.({ systemPrompt: BASE_PROMPT }) as { systemPrompt?: string } | undefined;
+			const promptRewrite = await handlers.get("before_agent_start")?.({ systemPrompt: BASE_PROMPT }) as { systemPrompt?: string } | undefined;
+			assert.equal(fs.existsSync(diagnosticPath), false);
+			assert.doesNotMatch(promptRewrite?.systemPrompt ?? "", /requested unavailable child tools/);
+
+			handlers.get("agent_start")?.({});
 			assert.deepEqual(readChildToolDiagnostic(diagnosticPath), {
 				agent: "extension-worker",
 				required: ["read", "fixture_search"],
 				available: ["read"],
 				missing: ["fixture_search"],
 			});
-			assert.match(missing?.systemPrompt ?? "", /requested unavailable child tools: fixture_search/);
-			assert.match(missing?.systemPrompt ?? "", /subagentOnlyExtensions/);
 
 			available.push("fixture_search");
-			const resolved = await handlers.get("before_agent_start")?.({ systemPrompt: BASE_PROMPT });
+			handlers.get("agent_start")?.({});
 			assert.equal(fs.existsSync(diagnosticPath), false);
-			assert.equal(resolved, undefined);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("ignores malformed inherited MCP metadata before strict availability diagnostics", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-stale-mcp-tool-diagnostic-"));
+		try {
+			const diagnosticPath = path.join(dir, "tools.json");
+			const handlers = new Map<string, (payload?: unknown) => unknown>();
+			process.env[REQUIRED_CHILD_TOOLS_ENV] = JSON.stringify(["read", "fixture_search"]);
+			process.env[MCP_DIRECT_CHILD_TOOLS_ENV] = "not-json";
+			process.env[CHILD_TOOL_DIAGNOSTIC_PATH_ENV] = diagnosticPath;
+			process.env[SUBAGENT_CHILD_AGENT_ENV] = "worker";
+
+			registerSubagentPromptRuntime({
+				on(event: string, handler: (payload?: unknown) => unknown) {
+					handlers.set(event, handler);
+				},
+				getAllTools: () => [{ name: "read" }],
+				registerTool() {},
+			} as { on(event: string, handler: (payload?: unknown) => unknown): void; getAllTools(): Array<{ name: string }>; registerTool(): void });
+
+			assert.doesNotThrow(() => handlers.get("agent_start")?.({}));
+			assert.deepEqual(readChildToolDiagnostic(diagnosticPath), {
+				agent: "worker",
+				required: ["read", "fixture_search"],
+				available: ["read"],
+				missing: ["fixture_search"],
+			});
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("classifies missing resolved MCP direct tools without softening strict diagnostics", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-mcp-tool-diagnostic-"));
+		try {
+			const diagnosticPath = path.join(dir, "tools.json");
+			const handlers = new Map<string, (payload?: unknown) => unknown>();
+			process.env[REQUIRED_CHILD_TOOLS_ENV] = JSON.stringify(["read", "rust_symbols_workspace_symbols", "fixture_search"]);
+			process.env[MCP_DIRECT_CHILD_TOOLS_ENV] = JSON.stringify(["rust_symbols_workspace_symbols"]);
+			process.env[CHILD_TOOL_DIAGNOSTIC_PATH_ENV] = diagnosticPath;
+			process.env[SUBAGENT_CHILD_AGENT_ENV] = "worker";
+
+			registerSubagentPromptRuntime({
+				on(event: string, handler: (payload?: unknown) => unknown) {
+					handlers.set(event, handler);
+				},
+				getAllTools: () => [{ name: "read" }],
+				registerTool() {},
+			} as { on(event: string, handler: (payload?: unknown) => unknown): void; getAllTools(): Array<{ name: string }>; registerTool(): void });
+
+			handlers.get("agent_start")?.({});
+			const diagnostic = readChildToolDiagnostic(diagnosticPath);
+			assert.deepEqual(diagnostic, {
+				agent: "worker",
+				required: ["read", "rust_symbols_workspace_symbols", "fixture_search"],
+				available: ["read"],
+				missing: ["rust_symbols_workspace_symbols", "fixture_search"],
+				missingMcpDirectTools: ["rust_symbols_workspace_symbols"],
+			});
+			assert.match(formatChildToolDiagnostic(diagnostic!), /host\/pi-mcp-adapter registration problem/);
+			assert.match(formatChildToolDiagnostic(diagnostic!), /fixture_search/);
+			assert.equal(fs.existsSync(diagnosticPath), true);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

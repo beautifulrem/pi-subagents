@@ -313,7 +313,7 @@ export class ScheduledRunManager {
 		if (sanitized.error) return textResult(sanitized.error, true);
 		const scheduleInput = params.schedule!.trim();
 		const sessionId = resolveCurrentSessionId(ctx.sessionManager);
-		if (this.deps.resolveCapabilityCeiling?.(ctx.sessionManager.getSessionId())) {
+		if (this.deps.resolveCapabilityCeiling?.(sessionId)) {
 			return textResult("Cannot schedule a capability-ceiling-restricted run because this store does not yet persist ceilings. Remove the active parent restriction or run it immediately.", true);
 		}
 		const runAt = parseScheduledRunTime(scheduleInput, this.now());

@@ -4,10 +4,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerNativeSupervisorClient } from "../../intercom/native-supervisor-channel.ts";
 import { consumeSteerRequestsFromDir, steerAckPathFromDir, writeSteerAckAt, writeSteerCapabilityAt, writeSteerRequestToDir, type SteerRequest } from "../background/control-channel.ts";
 import { SUBAGENT_CHILD_AGENT_ENV, SUBAGENT_CHILD_INDEX_ENV, SUBAGENT_FANOUT_CHILD_ENV, SUBAGENT_STEER_ACK_DIR_ENV, SUBAGENT_STEER_CAPABILITY_ENV, SUBAGENT_STEER_INBOX_ENV } from "./pi-args.ts";
-import { STRUCTURED_OUTPUT_CAPTURE_ENV, STRUCTURED_OUTPUT_SCHEMA_ENV, validateStructuredOutputValue } from "./structured-output.ts";
+import { RUNTIME_EXTENSION_ACK_EVENT, RUNTIME_EXTENSION_ACK_PATH_ENV, isRuntimeAcknowledgedExtensionId, writeRuntimeAcknowledgedExtensions } from "./runtime-acknowledged-extensions.ts";
+import { createStructuredOutputToolParameters, STRUCTURED_OUTPUT_CAPTURE_ENV, STRUCTURED_OUTPUT_SCHEMA_ENV, validateStructuredOutputValue } from "./structured-output.ts";
 import {
 	CHILD_TOOL_DIAGNOSTIC_PATH_ENV,
-	formatChildToolDiagnostic,
+	MCP_DIRECT_CHILD_TOOLS_ENV,
 	REQUIRED_CHILD_TOOLS_ENV,
 	writeChildToolDiagnostic,
 	type ChildToolDiagnostic,
@@ -79,12 +80,52 @@ function readRequiredChildTools(): string[] | undefined {
 	return required;
 }
 
+function readMcpDirectChildTools(): string[] | undefined {
+	const encoded = process.env[MCP_DIRECT_CHILD_TOOLS_ENV]?.trim();
+	if (!encoded) return undefined;
+	try {
+		const tools = JSON.parse(encoded) as unknown;
+		if (!Array.isArray(tools) || tools.some((name) => typeof name !== "string" || !name)) return undefined;
+		return tools;
+	} catch {
+		return undefined;
+	}
+}
+
 function refreshChildToolDiagnostic(pi: ExtensionAPI): ChildToolDiagnostic | undefined {
 	const filePath = process.env[CHILD_TOOL_DIAGNOSTIC_PATH_ENV]?.trim();
 	const required = readRequiredChildTools();
 	if (!filePath || !required) return undefined;
 	const available = pi.getAllTools().map((tool) => tool.name);
-	return writeChildToolDiagnostic(filePath, required, available, process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim());
+	return writeChildToolDiagnostic(filePath, required, available, process.env[SUBAGENT_CHILD_AGENT_ENV]?.trim(), readMcpDirectChildTools());
+}
+
+function registerRuntimeExtensionAcknowledgements(pi: ExtensionAPI): void {
+	const outputPath = process.env[RUNTIME_EXTENSION_ACK_PATH_ENV]?.trim();
+	if (!outputPath) return;
+	const ids: string[] = [];
+	let finalized = false;
+	const acknowledge = (payload: unknown): undefined => {
+		if (finalized || !payload || typeof payload !== "object") return undefined;
+		const id = (payload as { id?: unknown }).id;
+		if (isRuntimeAcknowledgedExtensionId(id)) ids.push(id);
+		return undefined;
+	};
+	const finalize = (): undefined => {
+		if (finalized) return undefined;
+		finalized = true;
+		writeRuntimeAcknowledgedExtensions(outputPath, ids);
+		return undefined;
+	};
+	try {
+		const events = (pi as { events?: { on?: (event: string, handler: (payload: unknown) => unknown) => unknown } }).events;
+		events?.on?.(RUNTIME_EXTENSION_ACK_EVENT, acknowledge);
+		const onRuntimeEvent = pi.on as unknown as (event: string, handler: (event?: unknown, ctx?: unknown) => unknown) => void;
+		onRuntimeEvent("agent_end", finalize);
+		onRuntimeEvent("session_shutdown", finalize);
+	} catch {
+		// Acknowledgement collection is optional observability and must not affect child execution.
+	}
 }
 
 function findSectionEnd(prompt: string, startIndex: number, nextHeaders: string[]): number {
@@ -334,6 +375,7 @@ export function registerSteeringInbox(
 }
 
 export default function registerSubagentPromptRuntime(pi: ExtensionAPI): void {
+	registerRuntimeExtensionAcknowledgements(pi);
 	registerSteeringInbox(pi);
 	registerToolBudget(
 		pi,
@@ -376,6 +418,8 @@ export default function registerSubagentPromptRuntime(pi: ExtensionAPI): void {
 		waitState.currentSessionId = sessionManager ? resolveCurrentSessionId(sessionManager) : null;
 		registerNativeSupervisorClientOnce();
 		if (readRequiredChildTools()?.includes("intercom")) registerNativeSupervisorFallbackOnce();
+	});
+	onRuntimeEvent("agent_start", () => {
 		refreshChildToolDiagnostic(pi);
 	});
 	onRuntimeEvent("agent_end", async (_event: unknown, ctx: unknown) => {
@@ -386,12 +430,7 @@ export default function registerSubagentPromptRuntime(pi: ExtensionAPI): void {
 	const structuredSchemaPath = process.env[STRUCTURED_OUTPUT_SCHEMA_ENV];
 	if (structuredOutputPath && structuredSchemaPath) {
 		const schema = JSON.parse(fs.readFileSync(structuredSchemaPath, "utf-8")) as JsonSchemaObject;
-		const parameters = {
-			type: "object",
-			properties: { value: schema },
-			required: ["value"],
-			additionalProperties: false,
-		};
+		const parameters = createStructuredOutputToolParameters(schema);
 		const registerTool = pi.registerTool as unknown as (tool: {
 			name: string;
 			label: string;
@@ -428,7 +467,6 @@ export default function registerSubagentPromptRuntime(pi: ExtensionAPI): void {
 
 	onRuntimeEvent("before_agent_start", async (event: { systemPrompt: string }) => {
 		registerNativeSupervisorFallbackOnce();
-		const toolDiagnostic = refreshChildToolDiagnostic(pi);
 		const intercomSessionName = process.env[SUBAGENT_INTERCOM_SESSION_NAME_ENV]?.trim();
 		if (intercomSessionName && typeof pi.setSessionName === "function") {
 			pi.setSessionName(intercomSessionName);
@@ -444,9 +482,6 @@ export default function registerSubagentPromptRuntime(pi: ExtensionAPI): void {
 				inheritSkills: inheritSkills ?? true,
 				fanoutChild: fanoutChild === true,
 			});
-		}
-		if (toolDiagnostic) {
-			rewritten = `${formatChildToolDiagnostic(toolDiagnostic)}\nDo not claim tool-dependent work succeeded; report this configuration error to the parent.\n\n${rewritten}`;
 		}
 		if (rewritten === event.systemPrompt) return;
 		return { systemPrompt: rewritten };

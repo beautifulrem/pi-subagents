@@ -285,6 +285,7 @@ describe("registered subagent tool prepareArguments", { skip: !schemasAvailable 
 		const output = execFileSync(
 			process.execPath,
 			[
+				"--experimental-strip-types",
 				"--import",
 				"tsx",
 				"--input-type=module",

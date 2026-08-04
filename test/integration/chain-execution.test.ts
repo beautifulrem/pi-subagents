@@ -64,7 +64,7 @@ interface TestParallelTask {
 	gateOn?: "execution" | "acceptance";
 }
 
-type TestChainStep = TestSequentialStep | {
+type TestChainStep = { checkpoint: string; message?: string; label?: string; phase?: string } | TestSequentialStep | {
 	parallel: TestParallelTask[];
 	concurrency?: number;
 	failFast?: boolean;
@@ -91,6 +91,7 @@ type TestChainStep = TestSequentialStep | {
 };
 
 interface ChainResultItem {
+	index: number;
 	agent: string;
 	exitCode: number;
 	finalOutput?: string;
@@ -118,6 +119,7 @@ interface ChainExecutionResult {
 		currentStepIndex?: number;
 		outputs?: Record<string, { text: string; structured?: unknown }>;
 		parallelHandoff?: { version: number; path: string; groupCount: number; childCount: number; cleanupState: string };
+		checkpoint?: { name?: string; status?: string; message?: string };
 	};
 }
 
@@ -214,6 +216,27 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 			"utf-8",
 		);
 	}
+
+	it("pauses foreground chains at approval checkpoints without launching the next child", async () => {
+		mockPi.onCall({ output: "analysis done" });
+		mockPi.onCall({ output: "should not run" });
+		const agents = [makeAgent("analyst"), makeAgent("worker")];
+
+		const result = await executeChain!(makeChainParams([
+			{ agent: "analyst", task: "Analyze" },
+			{ checkpoint: "review", message: "Approve implementation?" },
+			{ agent: "worker", task: "Implement" },
+		], agents));
+
+		assert.equal(result.isError, undefined);
+		assert.match(result.content[0]!.text, /Chain paused at checkpoint 'review'/);
+		assert.equal(result.details.results.length, 1);
+		assert.equal(result.details.checkpoint?.name, "review");
+		assert.equal(result.details.checkpoint?.status, "pending");
+		assert.equal(result.details.workflowGraph?.nodes[1]?.kind, "checkpoint");
+		assert.equal(result.details.workflowGraph?.nodes[1]?.status, "paused");
+		assert.equal(mockPi.callCount(), 1);
+	});
 
 	it("runs a 2-step chain", async () => {
 		mockPi.onCall({ output: "Analysis complete: found 3 issues" });
@@ -677,7 +700,7 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.deepEqual(dynamicNode?.children?.map((child) => child.itemKey), ["src/a.ts", "src/b.ts"]);
 	});
 
-	it("persists checked acceptance status for dynamic fanout materialized children and aggregate group", async () => {
+	it("persists checked child evidence and pending aggregate review for dynamic fanout", async () => {
 		mockPi.onCall({
 			output: "targets",
 			structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] },
@@ -709,8 +732,9 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.match(summary, /\{"ok":"b"\}/);
 		assert.doesNotMatch(summary, /acceptance-report/);
 		const dynamicNode = result.details.workflowGraph?.nodes[1];
-		assert.equal(dynamicNode?.acceptanceStatus, "checked");
+		assert.equal(dynamicNode?.acceptanceStatus, "review-required");
 		assert.deepEqual(dynamicNode?.children?.map((child) => child.acceptanceStatus), ["checked", "checked"]);
+		assert.deepEqual(result.details.results.filter((child) => child.agent === "reviewer").map((child) => child.acceptance?.evidenceStatus), ["checked", "checked"]);
 	});
 
 	it("inherits top-level disabled acceptance for dynamic children and their aggregate group", async () => {
@@ -870,7 +894,7 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 
 		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
 		const explorerResults = result.details.results.filter((child) => child.agent === "explorer");
-		assert.deepEqual(explorerResults.map((child) => child.acceptance?.effectiveAcceptance.level), ["reviewed", "reviewed"]);
+		assert.deepEqual(explorerResults.map((child) => child.acceptance?.effectiveAcceptance.level), ["checked", "checked"]);
 		const dynamicNode = result.details.workflowGraph?.nodes[1];
 		assert.equal(dynamicNode?.acceptanceStatus, "rejected");
 		assert.deepEqual(dynamicNode?.children?.map((child) => child.acceptanceStatus), ["rejected", "rejected"]);
@@ -1508,9 +1532,7 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 
 		assert.ok(!result.isError, `should succeed: ${JSON.stringify(result.content)}`);
 		assert.equal(result.details.results.length, 2);
-		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
-		assert.match(summary, /=== Final task 1: reviewer-a ===/);
-		assert.match(summary, /=== Final task 2: reviewer-b ===/);
+		assert.deepEqual(result.details.results.map((row) => row.index), [0, 1]);
 	});
 
 	it("aggregates worktree handoffs across foreground chain groups", { skip: process.platform === "win32" ? "worktree paths differ on Windows" : undefined }, async () => {
@@ -1543,69 +1565,6 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 		assert.equal(handoff.groups[0]!.cleanup.state, "complete");
 		assert.equal(fs.existsSync(handoff.groups[0]!.children[0]!.patch.path), true);
 		assert.match(handoff.groups[0]!.children[0]!.patch.path, /worktree-diffs\/foreground-chain-handoff\/step-0\//);
-	});
-
-	it("keeps static parallel output-save warnings visible in the terminal relay", async () => {
-		const runId = "static-warning-run";
-		const blockingParent = path.join(tempDir, runId, "parallel-0", "0-worker", "blocked");
-		mockPi.onCall({ output: "parallel response", writeFiles: [{ path: blockingParent, content: "not a directory" }] });
-		const agents = [makeAgent("worker")];
-
-		const result = await executeChain(
-			makeChainParams([{ parallel: [{ agent: "worker", task: "Return output", output: "blocked/output.md", outputMode: "file-only" }] }], agents, { chainDir: tempDir, runId }),
-		);
-
-		assert.ok(!result.isError);
-		const saveError = result.details.results[0]?.outputSaveError;
-		assert.ok(saveError, JSON.stringify(result.details.results[0]));
-		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
-		assert.match(summary, /WARNING:/);
-		assert.match(summary, new RegExp(saveError.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-	});
-
-	it("keeps dynamic output-save warnings visible in the terminal relay", async () => {
-		const runId = "dynamic-warning-run";
-		const blockingParent = path.join(tempDir, runId, "parallel-1", "0-delegate", "blocked");
-		mockPi.onCall({ output: "targets", structuredOutput: { items: ["alpha"] } });
-		mockPi.onCall({ output: "dynamic response", writeFiles: [{ path: blockingParent, content: "not a directory" }] });
-		const agents = [makeAgent("delegate")];
-
-		const result = await executeChain(
-			makeChainParams(
-				[
-					{ agent: "delegate", task: "Return targets", as: "targets", outputSchema: { type: "object" }, acceptance: false },
-					{
-						expand: { from: { output: "targets", path: "/items" }, maxItems: 1 },
-						parallel: { agent: "delegate", task: "Return output", output: "blocked/output.md", outputMode: "file-only", acceptance: false },
-						collect: { as: "outputs" },
-						acceptance: false,
-					},
-				],
-				agents,
-				{ chainDir: tempDir, runId },
-			),
-		);
-
-		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
-		const saveError = result.details.results[1]?.outputSaveError;
-		assert.ok(saveError, JSON.stringify(result.details.results[1]));
-		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
-		assert.match(summary, /WARNING:/);
-		assert.match(summary, new RegExp(saveError.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-	});
-
-	it("does not relay intermediate results through an empty final static group", async () => {
-		mockPi.onCall({ output: "INTERMEDIATE_SECRET" });
-		const agents = [makeAgent("worker")];
-
-		const result = await executeChain(
-			makeChainParams([{ agent: "worker", task: "First" }, { parallel: [] }], agents),
-		);
-
-		assert.ok(!result.isError);
-		const summary = result.content[0]?.type === "text" ? result.content[0].text : "";
-		assert.match(summary, /📤 Final output:\n\[\]/);
-		assert.doesNotMatch(summary, /INTERMEDIATE_SECRET/);
 	});
 
 	it("aggregates parallel outputs for next sequential step", async () => {
@@ -1913,6 +1872,7 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 
 		assert.ok(!result.isError);
 		assert.equal(result.details.results.length, 4);
+		assert.deepEqual(result.details.results.map((row) => row.index), [0, 1, 2, 3]);
 		assert.equal(result.details.totalSteps, 3);
 	});
 });

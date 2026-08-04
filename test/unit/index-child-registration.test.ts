@@ -119,6 +119,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
+				"--experimental-strip-types",
 				"--import",
 				"tsx",
 				"--input-type=module",
@@ -162,6 +163,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
+				"--experimental-strip-types",
 				"--import",
 				"tsx",
 				"--input-type=module",
@@ -212,6 +214,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
+				"--experimental-strip-types",
 				"--import",
 				"tsx",
 				"--input-type=module",
@@ -263,6 +266,7 @@ describe("subagent extension child mode", () => {
 			const output = execFileSync(
 				process.execPath,
 				[
+					"--experimental-strip-types",
 					"--import",
 					"tsx",
 					"--input-type=module",
@@ -312,7 +316,7 @@ describe("subagent extension child mode", () => {
 			`;
 			const env = parentToolEnv();
 			env.PI_CODING_AGENT_DIR = agentDir;
-			execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], { cwd: projectRoot, env, stdio: "pipe" });
+			execFileSync(process.execPath, ["--experimental-strip-types", "--import", "./test/support/register-loader.mjs", "--input-type=module", "--eval", script], { cwd: projectRoot, env, stdio: "pipe" });
 		} finally {
 			fs.rmSync(agentDir, { recursive: true, force: true });
 		}
@@ -383,7 +387,7 @@ describe("subagent extension child mode", () => {
 			env.PI_CODING_AGENT_DIR = agentDir;
 			execFileSync(
 				process.execPath,
-				["--import", "tsx", "--input-type=module", "--eval", script],
+				["--experimental-strip-types", "--import", "./test/support/register-loader.mjs", "--input-type=module", "--eval", script],
 				{ cwd: projectRoot, env, stdio: "pipe" },
 			);
 		} finally {
@@ -477,7 +481,7 @@ describe("subagent extension child mode", () => {
 			env.PI_CODING_AGENT_DIR = agentDir;
 			execFileSync(
 				process.execPath,
-				["--import", "tsx", "--input-type=module", "--eval", script],
+				["--experimental-strip-types", "--import", "./test/support/register-loader.mjs", "--input-type=module", "--eval", script],
 				{ cwd: projectRoot, env, stdio: "pipe" },
 			);
 		} finally {
@@ -513,6 +517,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
+				"--experimental-strip-types",
 				"--import",
 				"tsx",
 				"--input-type=module",
@@ -547,6 +552,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
+				"--experimental-strip-types",
 				"--import",
 				"tsx",
 				"--input-type=module",
@@ -582,6 +588,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
+				"--experimental-strip-types",
 				"--import",
 				"tsx",
 				"--input-type=module",
@@ -626,6 +633,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
+				"--experimental-strip-types",
 				"--import",
 				"tsx",
 				"--input-type=module",
@@ -671,6 +679,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
+				"--experimental-strip-types",
 				"--import",
 				"tsx",
 				"--input-type=module",

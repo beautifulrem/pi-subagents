@@ -74,7 +74,7 @@ test("read-only issue drafting tasks do not trigger on suggested fix wording", (
 	);
 });
 
-test("omitted, empty, bash, unknown, write, and MCP tool capabilities stay conservative", () => {
+test("omitted, bash, unknown, write, and MCP tool capabilities stay conservative while empty tools are toolless", () => {
 	const base = {
 		agent: "architect",
 		task: "Implement the approved source fix",
@@ -82,7 +82,7 @@ test("omitted, empty, bash, unknown, write, and MCP tool capabilities stay conse
 	};
 
 	assert.equal(evaluateCompletionMutationGuard(base).triggered, true);
-	assert.equal(evaluateCompletionMutationGuard({ ...base, tools: [] }).triggered, true);
+	assert.equal(evaluateCompletionMutationGuard({ ...base, tools: [] }).triggered, false);
 	assert.equal(evaluateCompletionMutationGuard({ ...base, tools: ["read", "bash", "ls"] }).triggered, true);
 	assert.equal(evaluateCompletionMutationGuard({ ...base, tools: ["read", "custom_lookup"] }).triggered, true);
 	assert.equal(evaluateCompletionMutationGuard({ ...base, tools: ["read", "write"] }).triggered, true);
@@ -242,6 +242,68 @@ test("Cursor replay tool calls count only edit/write activity as mutation", () =
 test("claimed changedFiles without mutation evidence does not bypass the guard", () => {
 	const report = assistantText(`Done.\n\`\`\`acceptance-report\n{\n  "changedFiles": ["docs/BACKEND_ARCHITECTURE.md"]\n}\n\`\`\``);
 	assert.equal(hasMutationToolCall([report]), false);
+});
+
+function checkpointDataEntry(beforeCommit: string, afterCommit: string): Message {
+	return {
+		type: "custom",
+		customType: "pi-checkpoint",
+		data: { beforeCommit, afterCommit },
+	} as unknown as Message;
+}
+
+function checkpointDetailsMessage(beforeCommit: string, afterCommit: string): Message {
+	return {
+		role: "custom",
+		customType: "pi-checkpoint",
+		content: [],
+		details: { beforeCommit, afterCommit },
+	} as unknown as Message;
+}
+
+function checkpointNestedDetailsMessage(beforeCommit: string, afterCommit: string): Message {
+	return {
+		role: "custom",
+		customType: "pi-checkpoint",
+		content: [],
+		details: { data: { beforeCommit, afterCommit } },
+	} as unknown as Message;
+}
+
+test("provider checkpoint with a changed commit counts as mutation evidence", () => {
+	for (const message of [
+		checkpointDataEntry("before", "after"),
+		checkpointDetailsMessage("before", "after"),
+		checkpointNestedDetailsMessage("before", "after"),
+	]) {
+		assert.equal(hasMutationToolCall([message]), true);
+		assert.equal(
+			evaluateCompletionMutationGuard({
+				agent: "worker",
+				task: "Edit the target source file",
+				messages: [message],
+			}).triggered,
+			false,
+		);
+	}
+});
+
+test("unchanged provider checkpoint does not bypass the completion guard", () => {
+	for (const message of [
+		checkpointDataEntry("same", "same"),
+		checkpointDetailsMessage("same", "same"),
+		checkpointNestedDetailsMessage("same", "same"),
+	]) {
+		assert.equal(hasMutationToolCall([message]), false);
+		assert.equal(
+			evaluateCompletionMutationGuard({
+				agent: "worker",
+				task: "Edit the target source file",
+				messages: [message],
+			}).triggered,
+			true,
+		);
+	}
 });
 
 test("implementation task with Cursor edit thinking does not trigger", () => {

@@ -131,6 +131,51 @@ Use the available tools.`;
 		assert.match(results[3] ?? "", /subagentOnlyExtensions/);
 	});
 
+	it("accepts child tools registered by async before_agent_start hooks", async () => {
+		const { runRealSubagentSession, subagentCall, subagentToolResults } = await import("../support/real-session-runner.ts");
+		const asyncExtensionAgent = `---
+name: async-extension-worker
+description: Uses a child-only tool registered from before_agent_start
+tools: read, fixture_async_search
+subagentOnlyExtensions: ./fixture-async-extension.ts
+completionGuard: false
+---
+Report active tools.`;
+		const fixtureAsyncExtension = `export default function (pi) {
+	pi.on("before_agent_start", async () => {
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		pi.registerTool({
+			name: "fixture_async_search",
+			label: "Fixture Async Search",
+			description: "Search the async E2E fixture.",
+			parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false },
+			async execute() { return { content: [{ type: "text", text: "async fixture result" }] }; },
+		});
+	});
+}`;
+
+		run = await runRealSubagentSession({
+			prompt: "Run the async child tool check.",
+			childText: CHILD_MARKER,
+			reportChildTools: true,
+			projectFiles: {
+				".pi/agents/async-extension-worker.md": asyncExtensionAgent,
+				"fixture-async-extension.ts": fixtureAsyncExtension,
+			},
+			respond(context) {
+				const resultCount = (context.messages as Array<{ role?: string; toolName?: string }>).filter((message) => message.role === "toolResult" && message.toolName === "subagent").length;
+				if (resultCount > 0) return "Async child tool check complete.";
+				return subagentCall({ agent: "async-extension-worker", task: "Report active tools.", context: "fresh", agentScope: "project" }, "call-async-extension");
+			},
+			timeoutMs: 60_000,
+		});
+
+		const results = subagentToolResults(run.parentSession);
+		assert.equal(results.length, 1);
+		assert.match(results[0] ?? "", /ACTIVE_TOOLS:[^\n]*fixture_async_search/);
+		assert.doesNotMatch(results[0] ?? "", /requested unavailable child tools/);
+	});
+
 	it("boots the extension in a real parent session and delivers a faux child result", async () => {
 		const { routeParentThroughSubagent, runRealSubagentSession, subagentToolResults } = await import("../support/real-session-runner.ts");
 

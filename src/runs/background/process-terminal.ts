@@ -22,58 +22,6 @@ export interface ProcessTerminalCandidate {
 	revivalLeaseReleaseAcknowledged?: boolean;
 }
 
-export interface ProcessTerminalWriterResult {
-	stepIndex?: number;
-	writerProcesses?: ProcessInstanceExitV1[];
-	writerAttemptCount?: number;
-}
-
-export function buildProcessTerminalCandidate(input: {
-	runId: string;
-	runnerProcessInstanceId: string;
-	stepCount: number;
-	results: readonly ProcessTerminalWriterResult[];
-	sessionFile?: string;
-	revivalLeaseToken?: string;
-}): ProcessTerminalCandidate {
-	if (!Number.isInteger(input.stepCount) || input.stepCount < 0) throw new Error("Invalid process-terminal status step count.");
-	const writers: Record<string, ProcessInstanceExitV1[]> = {};
-	const expectedWriters: Record<string, number> = {};
-	for (let index = 0; index < input.stepCount; index++) {
-		writers[String(index)] = [];
-		expectedWriters[String(index)] = 0;
-	}
-	const claimedSteps = new Set<number>();
-	for (const result of input.results) {
-		if (result.stepIndex === undefined) {
-			if (result.writerProcesses !== undefined || result.writerAttemptCount !== undefined) {
-				throw new Error("Process-terminal writer evidence is missing a stable stepIndex.");
-			}
-			// Aggregate-only results do not represent a status step.
-			continue;
-		}
-		const index = result.stepIndex;
-		if (!Number.isInteger(index) || index < 0 || index >= input.stepCount) {
-			throw new Error(`Process-terminal writer stepIndex '${index}' is outside the status step range.`);
-		}
-		if (claimedSteps.has(index)) throw new Error(`Duplicate process-terminal writer result for status step '${index}'.`);
-		claimedSteps.add(index);
-		const expected = result.writerAttemptCount ?? 0;
-		if (!Number.isInteger(expected) || expected < 0) throw new Error(`Invalid expected writer count for status step '${index}'.`);
-		writers[String(index)] = result.writerProcesses ?? [];
-		expectedWriters[String(index)] = expected;
-	}
-	return {
-		version: 1,
-		runId: input.runId,
-		runnerProcessInstanceId: input.runnerProcessInstanceId,
-		writers,
-		expectedWriters,
-		...(input.sessionFile ? { sessionFile: input.sessionFile } : {}),
-		...(input.revivalLeaseToken ? { revivalLeaseToken: input.revivalLeaseToken } : {}),
-	};
-}
-
 export interface RunnerCloseObservation {
 	processInstanceId: string;
 	closeObservedAt: number;
@@ -87,13 +35,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function validProcessInstance(value: unknown, kind?: "runner" | "pi-writer"): value is ProcessInstanceExitV1 {
 	if (!isRecord(value)) return false;
-	return typeof value.processInstanceId === "string"
-		&& value.processInstanceId.length > 0
-		&& (kind ? value.kind === kind : (value.kind === "runner" || value.kind === "pi-writer"))
-		&& typeof value.closeObservedAt === "number"
-		&& Number.isFinite(value.closeObservedAt)
-		&& (typeof value.exitCode === "number" || value.exitCode === null)
-		&& (typeof value.signal === "string" || value.signal === null);
+	if (typeof value.processInstanceId !== "string" || value.processInstanceId.length === 0) return false;
+	if (kind ? value.kind !== kind : (value.kind !== "runner" && value.kind !== "pi-writer")) return false;
+	if (typeof value.closeObservedAt !== "number" || !Number.isFinite(value.closeObservedAt)) return false;
+	if (typeof value.exitCode !== "number" && value.exitCode !== null) return false;
+	if (typeof value.signal !== "string" && value.signal !== null) return false;
+	return value.kind === "runner"
+		? value.attempt === undefined
+		: typeof value.attempt === "number" && Number.isInteger(value.attempt) && value.attempt >= 0;
 }
 
 function validInstance(value: unknown): value is ProcessInstanceExitV1 {
@@ -186,18 +135,16 @@ function validateProof(raw: unknown, asyncDir: string, fallback?: { runId?: stri
 	if (!isRecord(raw) || raw.version !== 1 || !["pending", "observed", "unknown", "not-started"].includes(String(raw.state)) || typeof raw.runId !== "string" || !raw.runId || typeof raw.runnerProcessInstanceId !== "string" || !raw.runnerProcessInstanceId) {
 		throw new Error(`Invalid process-terminal proof in '${asyncDir}'.`);
 	}
-	if (raw.childIndex !== undefined && (!Number.isInteger(raw.childIndex) || (raw.childIndex as number) < 0)) throw new Error(`Invalid process-terminal child index in '${asyncDir}'.`);
 	if (fallback?.runId && raw.runId !== fallback.runId) throw new Error(`Process-terminal proof in '${asyncDir}' belongs to run '${raw.runId}', expected '${fallback.runId}'.`);
 	if (fallback?.runnerProcessInstanceId && raw.runnerProcessInstanceId !== fallback.runnerProcessInstanceId) throw new Error(`Process-terminal proof in '${asyncDir}' belongs to runner '${raw.runnerProcessInstanceId}', expected '${fallback.runnerProcessInstanceId}'.`);
-	if (raw.instances !== undefined && (!Array.isArray(raw.instances) || !raw.instances.every((entry) => validProcessInstance(entry)))) throw new Error(`Invalid process-terminal instances in '${asyncDir}'.`);
-	if (raw.childIndex !== undefined && raw.state !== "observed" && raw.instances?.some((entry) => entry.kind === "runner")) {
-		throw new Error(`Non-observed child process-terminal proof in '${asyncDir}' inherited the root runner instance.`);
+	if (raw.instances !== undefined && (!Array.isArray(raw.instances) || !raw.instances.every((entry) => validProcessInstance(entry)))) {
+		throw new Error(`Invalid process-terminal instances in '${asyncDir}'.`);
 	}
 	if (raw.state === "observed") {
 		if (typeof raw.observedAt !== "number" || !Number.isFinite(raw.observedAt)) throw new Error(`Observed process-terminal proof in '${asyncDir}' is missing observedAt.`);
 		if (!Array.isArray(raw.instances)) throw new Error(`Observed process-terminal proof in '${asyncDir}' is missing instances.`);
-		const runners = raw.instances.filter((entry) => isRecord(entry) && entry.kind === "runner");
-		if (runners.length !== 1 || !validProcessInstance(runners[0], "runner") || runners[0].processInstanceId !== raw.runnerProcessInstanceId) throw new Error(`Observed process-terminal proof in '${asyncDir}' has no unique matching runner instance.`);
+		const runner = raw.instances.find((entry) => isRecord(entry) && entry.kind === "runner");
+		if (!validProcessInstance(runner, "runner") || runner.processInstanceId !== raw.runnerProcessInstanceId) throw new Error(`Observed process-terminal proof in '${asyncDir}' has no matching runner instance.`);
 	}
 	if (raw.resumeDisposition !== undefined && !["resumable", "non-resumable", "unavailable"].includes(String(raw.resumeDisposition))) throw new Error(`Invalid process-terminal resume disposition in '${asyncDir}'.`);
 	return true;
@@ -224,27 +171,40 @@ export function readProcessTerminal(asyncDir: string, fallback?: { runId?: strin
 	}
 }
 
+function stepProcessTerminalProof(
+	proof: ProcessTerminalV1,
+	childIndex: number,
+	state: ProcessTerminalV1["state"],
+	records: ProcessInstanceExitV1[],
+	resumeDispositionValue: ProcessTerminalV1["resumeDisposition"],
+): ProcessTerminalV1 {
+	const base = {
+		version: 1 as const,
+		runId: proof.runId,
+		childIndex,
+		runnerProcessInstanceId: proof.runnerProcessInstanceId,
+		...(resumeDispositionValue ? { resumeDisposition: resumeDispositionValue } : {}),
+	};
+	if (state === "observed") {
+		return { ...base, state, observedAt: proof.state === "observed" ? proof.observedAt : Date.now(), instances: records };
+	}
+	if (state === "unknown") {
+		return { ...base, state, reason: proof.state === "unknown" ? proof.reason : "writer-close-unverified" };
+	}
+	return { ...base, state };
+}
+
 function overlayStatus(asyncDir: string, proof: ProcessTerminalV1, candidate?: ProcessTerminalCandidate): void {
 	const statusPath = path.join(asyncDir, "status.json");
 	try {
 		const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatus;
 		status.processTerminal = proof;
 		if (status.steps) {
-			const rootRunner = proof.state === "observed"
-				? proof.instances?.find((instance) => instance.kind === "runner" && instance.processInstanceId === proof.runnerProcessInstanceId)
-				: undefined;
 			for (const [index, step] of status.steps.entries()) {
 				const records = candidate?.writers[String(index)] ?? [];
 				const expected = candidate?.expectedWriters?.[String(index)] ?? (records.length > 0 ? records.length : 0);
-				const stepState = expected === 0 ? "not-started" : proof.state === "observed" && rootRunner && records.length === expected ? "observed" : proof.state === "pending" ? "pending" : "unknown";
-				const instances = stepState === "observed" && rootRunner ? [rootRunner, ...records] : records;
-				step.processTerminal = {
-					...proof,
-					state: stepState,
-					childIndex: index,
-					instances,
-					resumeDisposition: resumeDisposition(step.status, step.sessionFile ?? candidate?.sessionFile),
-				};
+				const stepState = expected === 0 ? "not-started" : proof.state === "observed" && records.length === expected ? "observed" : proof.state === "pending" ? "pending" : "unknown";
+				step.processTerminal = stepProcessTerminalProof(proof, index, stepState, records, resumeDisposition(step.status, step.sessionFile ?? candidate?.sessionFile));
 			}
 		}
 		writeAtomicJson(statusPath, status);
@@ -253,7 +213,11 @@ function overlayStatus(asyncDir: string, proof: ProcessTerminalV1, candidate?: P
 	}
 }
 
-export function finalizeProcessTerminal(asyncDir: string, runId: string, runnerClose: RunnerCloseObservation): ProcessTerminalV1 {
+export function finalizeProcessTerminal(
+	asyncDir: string,
+	runId: string,
+	runnerClose: RunnerCloseObservation,
+): ProcessTerminalV1 {
 	const existing = readProcessTerminal(asyncDir, { runId, runnerProcessInstanceId: runnerClose.processInstanceId });
 	if (existing && fs.existsSync(processTerminalPath(asyncDir))) {
 		if (existing.state === "observed" && existing.runId === runId && existing.runnerProcessInstanceId === runnerClose.processInstanceId) return existing;
@@ -267,34 +231,25 @@ export function finalizeProcessTerminal(asyncDir: string, runId: string, runnerC
 		if (!candidate) proof = unknownProof(runId, runnerClose.processInstanceId, "runner-candidate-missing");
 		else if (candidate.runId !== runId || candidate.runnerProcessInstanceId !== runnerClose.processInstanceId) proof = unknownProof(runId, runnerClose.processInstanceId, "runner-instance-mismatch");
 		else {
+			const allWriters = Object.values(candidate.writers).flat();
 			const status = (() => {
 				try { return JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatus; } catch { return undefined; }
 			})();
-			const statusSteps = Array.isArray(status?.steps) ? status.steps : undefined;
-			const allWriters = Object.values(candidate.writers).flat();
 			const session = candidate.sessionFile ? inspectSessionLease(candidate.sessionFile) : undefined;
 			const writerEntries = Object.entries(candidate.writers);
 			const expectedWriters = candidate.expectedWriters ?? Object.fromEntries(writerEntries.map(([index, records]) => [index, records.length]));
 			const expectedEntries = Object.entries(expectedWriters);
 			const expectedIndexes = new Set(expectedEntries.map(([index]) => index));
 			const writerIndexes = new Set(writerEntries.map(([index]) => index));
-			const completeStepMap = statusSteps !== undefined
-				&& writerEntries.length === statusSteps.length
-				&& expectedEntries.length === statusSteps.length
-				&& statusSteps.every((_step, index) => Object.hasOwn(candidate.writers, String(index)) && Object.hasOwn(expectedWriters, String(index)))
-				&& writerEntries.every(([index]) => /^(?:0|[1-9]\d*)$/u.test(index) && Number(index) < statusSteps.length)
-				&& expectedEntries.every(([index]) => /^(?:0|[1-9]\d*)$/u.test(index) && Number(index) < statusSteps.length);
-			const writerProcessIds = allWriters.map((writer) => writer.processInstanceId);
-			const duplicateWriterProcess = new Set(writerProcessIds).size !== writerProcessIds.length
-				|| writerProcessIds.includes(runnerClose.processInstanceId);
-			const inconsistentWriters = !completeStepMap
-				|| duplicateWriterProcess
-				|| writerEntries.some(([index, records]) => !expectedIndexes.has(index) || records.length !== expectedWriters[index])
+			const inconsistentWriters = writerEntries.some(([index, records]) => !expectedIndexes.has(index) || records.length !== expectedWriters[index])
 				|| expectedEntries.some(([index, expected]) => !writerIndexes.has(index) && expected !== 0);
-			if (session && session.state !== "free") proof = unknownProof(runId, runnerClose.processInstanceId, session.state === "owned" ? "canonical-session-lease-active" : "canonical-session-unavailable");
-			else if (candidate.revivalLeaseToken && candidate.revivalLeaseReleaseAcknowledged !== true) proof = unknownProof(runId, runnerClose.processInstanceId, "canonical-session-release-unverified");
-			else if (inconsistentWriters || (allWriters.length === 0 && expectedEntries.length === 0)) proof = unknownProof(runId, runnerClose.processInstanceId, "writer-close-unverified");
-			else {
+			if (session && session.state !== "free") {
+				proof = unknownProof(runId, runnerClose.processInstanceId, session.state === "owned" ? "canonical-session-lease-active" : "canonical-session-unavailable");
+			} else if (candidate.revivalLeaseToken && candidate.revivalLeaseReleaseAcknowledged !== true) {
+				proof = unknownProof(runId, runnerClose.processInstanceId, "canonical-session-release-unverified");
+			} else if (inconsistentWriters || (allWriters.length === 0 && expectedEntries.length === 0)) {
+				proof = unknownProof(runId, runnerClose.processInstanceId, "writer-close-unverified");
+			} else {
 				const runner: ProcessInstanceExitV1 = { kind: "runner", ...runnerClose };
 				const canonicalSession = session && sessionProjection(candidate, session);
 				proof = {

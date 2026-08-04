@@ -15,6 +15,7 @@ import {
 	resolveCompletionBatchConfig,
 } from "./completion-batcher.ts";
 import { SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_FOREGROUND_COMPLETE_EVENT, type ParallelHandoffReference, type SubagentState } from "../../shared/types.ts";
+import { isUnexplainedProcessSignal } from "../shared/process-signal.ts";
 
 export interface SubagentNotifyDetails {
 	agent: string;
@@ -37,6 +38,21 @@ export interface CompletionNotification {
 	summary?: string;
 	exitCode?: number;
 	state?: string;
+	processSignal?: string | null;
+	interrupted?: boolean;
+	timedOut?: boolean;
+	stopped?: boolean;
+	turnBudgetExceeded?: boolean;
+	results?: Array<{
+		status?: string;
+		success?: boolean;
+		exitCode?: number | null;
+		processSignal?: string | null;
+		interrupted?: boolean;
+		timedOut?: boolean;
+		stopped?: boolean;
+		turnBudgetExceeded?: boolean;
+	}>;
 	timestamp?: number;
 	durationMs?: number;
 	cwd?: string;
@@ -48,6 +64,8 @@ export interface CompletionNotification {
 	totalTasks?: number;
 	sessionId?: string | null;
 	triggerTurn?: boolean;
+	/** True when an acknowledged grouped intercom relay already delivered this run. */
+	intercomDelivered?: boolean;
 	parallelHandoff?: ParallelHandoffReference;
 }
 
@@ -100,13 +118,10 @@ export function parseSubagentNotifyContent(content: string): SubagentNotifyDetai
 		? resultEnd - 1
 		: -1;
 	const sessionLine = sessionIndex >= 0 ? body[sessionIndex] : undefined;
-	if (sessionIndex >= 0) resultEnd = sessionIndex - 1;
-	const handoffIndex = resultEnd >= 2
-		&& body[resultEnd - 2]?.trim() === ""
-		&& body[resultEnd - 1]?.startsWith("Parallel handoff: ")
-		? resultEnd - 1
-		: -1;
-	if (handoffIndex >= 0) resultEnd = handoffIndex - 1;
+	const handoffIndex = body.findIndex((line) => line.startsWith("Parallel handoff: "));
+	const metadataIndexes = [sessionIndex, handoffIndex].filter((index) => index >= 0);
+	const firstMetadataIndex = metadataIndexes.length ? Math.min(...metadataIndexes) : body.length;
+	const resultEnd = firstMetadataIndex > 0 && body[firstMetadataIndex - 1]?.trim() === "" ? firstMetadataIndex - 1 : firstMetadataIndex;
 	const resultPreview = body.slice(0, resultEnd).join("\n").trim() || "(no output)";
 	const handoffPath = handoffIndex >= 0 ? body[handoffIndex]!.slice("Parallel handoff: ".length).trim() : undefined;
 	let sessionLabel: string | undefined;
@@ -180,12 +195,18 @@ function completionBatchKey(result: CompletionNotification): string {
 export function buildCompletionDetails(result: CompletionNotification): SubagentNotifyDetails {
 	const agent = result.agent ?? "unknown";
 	const summary = typeof result.summary === "string" ? result.summary : "";
-	const paused = !result.success && (
+	const stopped = result.stopped === true
+		|| result.state === "stopped"
+		|| (result.success !== true && result.exitCode !== 0 && isUnexplainedProcessSignal(result))
+		|| result.results?.some((child) => child.stopped === true
+			|| child.status === "stopped"
+			|| (child.success !== true && child.exitCode !== 0 && isUnexplainedProcessSignal(child))) === true;
+	const paused = !stopped && !result.success && (
 		result.exitCode === 0
 		|| result.state === "paused"
 		|| summary.startsWith("Paused after interrupt.")
 	);
-	const status = !result.success && result.state === "stopped" ? "stopped" : paused ? "paused" : result.success ? "completed" : "failed";
+	const status = stopped ? "stopped" : paused ? "paused" : result.success ? "completed" : "failed";
 	const taskInfo =
 		result.taskIndex !== undefined && result.totalTasks !== undefined
 			? ` (${result.taskIndex + 1}/${result.totalTasks})`
@@ -253,6 +274,7 @@ export default function registerSubagentNotify(
 
 	const deliver = (result: CompletionNotification): Promise<boolean> => {
 		if (disposed || typeof result.sessionId !== "string" || result.sessionId !== state.currentSessionId) return Promise.resolve(false);
+		if (result.intercomDelivered === true) return Promise.resolve(true);
 		const key = buildCompletionKey(result, "notify");
 		const seenAt = seen.get(key);
 		if (seenAt !== undefined && now() - seenAt <= ttlMs) return Promise.resolve(true);

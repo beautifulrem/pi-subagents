@@ -27,8 +27,8 @@ describe("async status helpers", () => {
 				currentStep: 1,
 				outputFile,
 				steps: [
-					{ agent: "scout", status: "complete", durationMs: 10 },
-					{ agent: "worker", status: "running", runnableAt: 100, queueDurationMs: 0, startedAt: 100, durationMs: 20 },
+					{ agent: "scout", status: "complete", durationMs: 10, description: "Inspect auth only" },
+					{ agent: "worker", status: "running", durationMs: 20, description: "Patch billing only" },
 				],
 			});
 			createAsyncDir(root, "run-b", {
@@ -47,11 +47,9 @@ describe("async status helpers", () => {
 			assert.equal(runs[0]?.steps.length, 2);
 			assert.equal(runs[0]?.steps[1]?.agent, "worker");
 			assert.equal(runs[0]?.steps[1]?.status, "running");
-			assert.equal(runs[0]?.steps[1]?.runnableAt, 100);
-			assert.equal(runs[0]?.steps[1]?.queueDurationMs, 0);
-			const text = formatAsyncRunList(runs);
-			assert.match(text, /worker \| running \| queue 0ms/);
-			assert.match(text, /output: .*output-1\.log/);
+			assert.equal(runs[0]?.steps[0]?.description, "Inspect auth only");
+			assert.equal(runs[0]?.steps[1]?.description, "Patch billing only");
+			assert.match(formatAsyncRunList(runs), /output: .*output-1\.log/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -86,6 +84,32 @@ describe("async status helpers", () => {
 			assert.equal(step?.usageIncomplete, true);
 			assert.equal(step?.review?.status, "not-requested");
 			assert.equal(step?.effects?.fileMutation?.status, "missing");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves capability ceiling and audit projections on summaries", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-status-capability-"));
+		try {
+			const ceiling = { version: 1, allowedTools: ["read"], denyExtensions: true, sources: ["plan"] };
+			const audit = { ceiling, requestedTools: ["read", "write"], effectiveTools: ["read"], removedTools: ["write"], internalTools: [], extensionsDenied: true, removedExtensionCount: 1, requestedMcpToolCount: 0, effectiveMcpTools: [] };
+			createAsyncDir(root, "run-capability", {
+				runId: "run-capability",
+				mode: "single",
+				state: "complete",
+				startedAt: 100,
+				lastUpdate: 200,
+				capabilityCeiling: ceiling,
+				capabilityAudit: audit,
+				steps: [{ agent: "worker", status: "complete", capabilityCeiling: ceiling, capabilityAudit: audit }],
+			});
+
+			const runs = listAsyncRuns(root, { states: ["complete"] });
+			assert.deepEqual(runs[0]?.capabilityCeiling, ceiling);
+			assert.deepEqual(runs[0]?.capabilityAudit, audit);
+			assert.deepEqual(runs[0]?.steps[0]?.capabilityCeiling, ceiling);
+			assert.deepEqual(runs[0]?.steps[0]?.capabilityAudit, audit);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

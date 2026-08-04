@@ -531,7 +531,14 @@ function cleanupSingleWorktree(repoCwd: string, worktree: WorktreeInfo): Worktre
 	} catch (error) {
 		errors.push(`branch removal failed: ${error instanceof Error ? error.message : String(error)}`);
 	}
-	return { index: worktree.index, path: worktree.path, branch: worktree.branch, worktreeRemoved, branchRemoved, ...(errors.length ? { errors } : {}) };
+	return {
+		index: worktree.index,
+		path: worktree.path,
+		branch: worktree.branch,
+		worktreeRemoved,
+		branchRemoved,
+		...(errors.length ? { errors } : {}),
+	};
 }
 
 function hasWorktreeChanges(diff: WorktreeDiff): boolean {
@@ -613,7 +620,12 @@ export function cleanupWorktrees(setup: WorktreeSetup): WorktreeCleanupReport {
 		errors.push(`worktree prune failed: ${error instanceof Error ? error.message : String(error)}`);
 	}
 	const state = tasks.every((task) => task.worktreeRemoved && task.branchRemoved) && pruned ? "complete" : "partial";
-	return { state, tasks, pruned, ...(errors.length ? { errors } : {}) };
+	return {
+		state,
+		tasks,
+		pruned,
+		...(errors.length ? { errors } : {}),
+	};
 }
 
 export function formatWorktreeDiffSummary(diffs: WorktreeDiff[]): string {

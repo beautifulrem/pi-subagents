@@ -69,6 +69,7 @@ interface PromptTemplateDelegationTaskProgress {
 
 export interface PromptTemplateDelegationUpdate {
 	requestId: string;
+	runId?: string;
 	currentTool?: string;
 	currentToolArgs?: string;
 	recentOutput?: string;
@@ -104,6 +105,7 @@ export interface PromptTemplateBridgeResult {
 			stopped?: boolean;
 			turnBudgetExceeded?: boolean;
 			toolBudgetBlocked?: boolean;
+			structuredOutputFailed?: boolean;
 			savedOutputPath?: string;
 			sessionFile?: string;
 			agentContract?: AgentContract;
@@ -142,6 +144,8 @@ export interface DelegatedSubagentExecutionParams {
 	worktree?: boolean;
 	timeoutMs?: number;
 	turnBudget?: TurnBudgetConfig;
+	/** Internal-only strict turn-boundary enforcement for versioned foreground delegation. */
+	enforceHardTurnLimit?: boolean;
 	toolBudget?: ToolBudgetConfig;
 	skill?: string | string[] | boolean;
 	output?: string | boolean;
@@ -320,6 +324,7 @@ export function toDelegationUpdate(requestId: string, update: PromptTemplateBrid
 			: undefined;
 	return {
 		requestId,
+		...(update.details?.runId ? { runId: update.details.runId } : {}),
 		currentTool: progress?.currentTool,
 		currentToolArgs: progress?.currentToolArgs,
 		recentOutput: safeLastOutput,
@@ -366,6 +371,7 @@ export function toSubagentDelegationExecutionParams(request: SubagentDelegationR
 		model: request.model,
 		timeoutMs: request.timeoutMs,
 		turnBudget: request.turnBudget,
+		enforceHardTurnLimit: true,
 		toolBudget: request.toolBudget,
 		skill: request.skill,
 		output: request.output,
@@ -389,6 +395,7 @@ export function toSubagentDelegationV2ExecutionParams(request: SubagentDelegatio
 		model: request.model,
 		timeoutMs: request.timeoutMs,
 		turnBudget: request.turnBudget,
+		enforceHardTurnLimit: true,
 		toolBudget: request.toolBudget,
 		skill: request.skill,
 		output: false,
@@ -409,6 +416,7 @@ export function toSubagentDelegationUpdate(requestId: string, result: PromptTemp
 	return {
 		version: SUBAGENT_DELEGATION_PROTOCOL_VERSION,
 		requestId,
+		...(legacy.runId ? { runId: legacy.runId } : {}),
 		...(legacy.currentTool ? { currentTool: legacy.currentTool } : {}),
 		...(legacy.currentToolArgs ? { currentToolArgs: legacy.currentToolArgs } : {}),
 		...(legacy.recentOutput ? { recentOutput: legacy.recentOutput } : {}),
@@ -432,6 +440,7 @@ export function toSubagentDelegationV2Update(
 		requestId: request.requestId,
 		ownerRunId: request.ownerRunId,
 		nodeId: request.nodeId,
+		...(legacy.runId ? { runId: legacy.runId } : {}),
 		...(legacy.currentTool ? { currentTool: legacy.currentTool } : {}),
 		...(legacy.currentToolArgs ? { currentToolArgs: legacy.currentToolArgs } : {}),
 		...(legacy.recentOutput ? { recentOutput: legacy.recentOutput } : {}),
@@ -452,6 +461,7 @@ function resolveSubagentDelegationStatus(
 	const child = result.details?.results?.[0];
 	if (!child) return "failed";
 	if (result.details?.timedOut || child.timedOut) return "timed_out";
+	if (child?.structuredOutputFailed) return "structured_output_failed";
 	if (child?.turnBudgetExceeded) return "turn_budget_exhausted";
 	if (child?.toolBudgetBlocked) return "tool_budget_exhausted";
 	if (!isAgentContractV1(child.agentContract) && child?.acceptance?.status === "rejected" && child.acceptance.explicit) return "acceptance_failed";
@@ -485,7 +495,7 @@ export function toSubagentDelegationResponse(
 		...(child?.finalOutput ? { output: child.finalOutput } : {}),
 		...(child?.savedOutputPath ? { outputPath: child.savedOutputPath } : {}),
 		...(child?.sessionFile ? { sessionFile: child.sessionFile } : {}),
-		...(child?.acceptance ? { acceptance: { status: child.acceptance.status, explicit: child.acceptance.explicit } } : {}),
+		...(child?.acceptance ? { acceptance: { status: child.acceptance.status, evidenceStatus: child.acceptance.evidenceStatus, explicit: child.acceptance.explicit } } : {}),
 		...(child?.review ? { review: child.review as SubagentDelegationReviewResult } : {}),
 		...(child?.effects ? { effects: child.effects as SubagentDelegationEffectsResult } : {}),
 		...(typeof child?.usage?.turns === "number" ? { turns: child.usage.turns } : {}),
@@ -547,6 +557,7 @@ export function toSubagentDelegationV2Response(
 		...(child?.model ? { model: child.model } : {}),
 		...(child?.thinking ? { thinking: child.thinking } : {}),
 		...(typeof child?.exitCode === "number" ? { exitCode: child.exitCode } : {}),
+		...(child?.launchContractDigest ? { launchContractDigest: child.launchContractDigest } : {}),
 		...(projectedResult ? { result: projectedResult } : {}),
 		...(usage ? {
 			usage: {

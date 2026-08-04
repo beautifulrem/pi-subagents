@@ -25,7 +25,7 @@ import { resolveCurrentSessionId } from "../shared/session-identity.ts";
 import { cleanupOldChainDirs } from "../shared/settings.ts";
 import { clearLegacyResultAnimationTimer, renderSubagentResult } from "../tui/render.ts";
 import { openSubagentFleet } from "../tui/fleet.ts";
-import { SubagentFleetStatus } from "../tui/fleet-status.ts";
+import { SubagentFleetStatus, resolveFleetViewPlacement } from "../tui/fleet-status.ts";
 import { SubagentParams } from "./schemas.ts";
 import { validateChainInput } from "./chain-validation.ts";
 import { createSubagentExecutor, type SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
@@ -142,6 +142,37 @@ function createSlashResultComponent(
 	return container;
 }
 
+class SubagentControlNoticeComponent implements Component {
+	private readonly details: SubagentControlMessageDetails;
+	private readonly theme: ExtensionContext["ui"]["theme"];
+
+	constructor(details: SubagentControlMessageDetails, theme: ExtensionContext["ui"]["theme"]) {
+		this.details = details;
+		this.theme = theme;
+	}
+
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		const eventLabel = this.details.event.type.replaceAll("_", " ");
+		if (width < 3) return [truncateToWidth(`Subagent ${eventLabel}`, width)];
+		const bodyWidth = Math.max(1, width - 2);
+		const borderChar = "─";
+		const header = ` ⚠ Subagent ${eventLabel}: ${this.details.event.agent} `;
+		const headerText = truncateToWidth(header, bodyWidth, "");
+		const headerPadding = Math.max(0, bodyWidth - visibleWidth(headerText));
+		const lines = [this.theme.fg("accent", `╭${headerText}${borderChar.repeat(headerPadding)}╮`)];
+
+		for (const line of wrapTextWithAnsi(formatSubagentControlNotice(this.details), bodyWidth)) {
+			const text = truncateToWidth(line, bodyWidth, "");
+			const padding = Math.max(0, bodyWidth - visibleWidth(text));
+			lines.push(this.theme.fg("accent", `│${text}${" ".repeat(padding)}│`));
+		}
+		lines.push(this.theme.fg("accent", `╰${borderChar.repeat(bodyWidth)}╯`));
+		return lines;
+	}
+}
+
 export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	if (process.env[SUBAGENT_CHILD_ENV] === "1") {
 		return;
@@ -176,6 +207,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	const waitToolConfig = resolveWaitToolConfig(config.waitTool);
 	const asyncByDefault = config.asyncByDefault === true;
 	const fleetViewEnabled = config.fleetView !== false;
+	const fleetViewPlacement = resolveFleetViewPlacement(config.fleetViewPlacement);
 	const asyncWidgetEnabled = config.asyncWidget === true || (!fleetViewEnabled && config.asyncWidget !== false);
 	const tempArtifactsDir = getArtifactsDir(null);
 
@@ -228,14 +260,17 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 			const ctx = state.lastUiContext;
 			if (!ctx?.hasUI) return;
 			await openSubagentFleet(ctx, state, { initialKey: itemKey });
-		})
+		}, { placement: fleetViewPlacement })
 		: undefined;
 	const { startResultWatcher, primeExistingResults, stopResultWatcher } = createResultWatcher(
 		pi,
 		state,
 		RESULTS_DIR,
 		10 * 60 * 1000,
-		{ notifier: completionNotifier, resultIntercom: config.resultIntercom === true },
+		{
+			notifier: completionNotifier,
+			deliverIntercomResults: config.intercomBridge?.resultDelivery !== false,
+		},
 	);
 
 	const runtimeCleanup = () => {
@@ -388,6 +423,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		events: pi.events,
 		getContext: () => state.lastUiContext,
 		execute: (id, params, signal, onUpdate, ctx) => executor.execute(id, params, signal, onUpdate, ctx),
+		state,
 	});
 
 	function effectiveParallelTaskCount(tasks: Array<{ count?: unknown }> | undefined): number {
@@ -555,6 +591,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		}
 		state.lastUiContext = ctx;
 		clearPendingForegroundControlNotices(state);
+		state.foregroundControls.clear();
+		state.lastForegroundControlId = null;
 		resetJobs(ctx);
 		restoreActiveJobs(ctx);
 		scheduledRunManager.bindSession(ctx);
